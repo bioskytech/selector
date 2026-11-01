@@ -1,0 +1,28 @@
+name: iOS build
+on:
+  push:
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pick Xcode 16
+        run: |
+          ls /Applications | grep -i xcode || true
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)"
+          xcodebuild -version
+      - name: Build for the Simulator (no signing)
+        run: |
+          set -o pipefail
+          cd ios/Selector
+          xcodebuild -project Selector.xcodeproj -target Selector -sdk iphonesimulator -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" ONLY_ACTIVE_ARCH=YES ARCHS=arm64 build 2>&1 | tee build.log | grep -E "error:|warning: unre|BUILD|Compiling|Linking" || true
+          if grep -q "BUILD SUCCEEDED" build.log; then exit 0; fi
+          echo "---- errors ----"; grep -E "error:" build.log | sort -u | head -80; exit 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-log
+          path: ios/Selector/build.log

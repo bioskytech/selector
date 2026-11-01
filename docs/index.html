@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Selector</title>
+<meta name="theme-color" content="#0A0A0D">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Selector">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&display=swap">
+<link rel="stylesheet" href="styles.css">
+<script src="config.js"></script>
+<script>
+  window.__mkReady = new Promise(function (resolve) { document.addEventListener('musickitloaded', resolve, { once: true }); });
+</script>
+<script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js" async></script>
+</head>
+<body>
+<div id="app">
+
+  <!-- 1 · Tonight -->
+  <section class="screen" id="s-tonight">
+    <div class="scroll">
+      <header class="top">
+        <div class="kicker" id="dayline">Saturday evening</div>
+        <div class="titlerow">
+          <h1>Tonight</h1>
+          <button class="avatar" id="btn-you" type="button" aria-label="Apple Music connection">B</button>
+        </div>
+      </header>
+
+      <button class="ask" id="btn-ask" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <span>Tell your DJ what tonight is</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+      </button>
+
+      <div class="hero" id="hero">
+        <div class="kicker">READY FOR YOU</div>
+        <div class="hero-row">
+          <div class="mosaic" id="hero-mosaic"></div>
+          <div class="hero-text">
+            <h2 id="hero-title">Sangeet night</h2>
+            <div class="sub" id="hero-sub">2 hours · Bollywood, Punjabi, Telugu &amp; Tamil</div>
+            <div class="muted" id="hero-why">From the sounds you pick most</div>
+          </div>
+        </div>
+        <div class="hero-actions">
+          <button class="btn-primary" id="btn-hero-start" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start the night</button>
+          <button class="btn-ghost" id="btn-hero-change" type="button">Change</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-head"><h2>Quick starts</h2><button class="link" id="btn-quick-all" type="button">See all</button></div>
+        <div class="tiles-row" id="quick-starts"></div>
+      </div>
+
+      <div class="section" id="nights-section" hidden>
+        <div class="section-head"><h2>Your nights</h2></div>
+        <div id="nights-list"></div>
+      </div>
+      <div class="footnote">Your DJ learned from 5,040 real DJ sets. Songs play through your own Apple Music.</div>
+    </div>
+  </section>
+
+  <!-- 2 · Your night -->
+  <section class="screen" id="s-brief" hidden>
+    <nav class="nav"><button class="nav-btn" data-go="tonight" type="button" aria-label="Back"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button><div class="nav-title">Your night</div><button class="nav-text" id="btn-reset" type="button">Reset</button></nav>
+    <div class="scroll">
+      <button class="row-card" id="row-occasion" type="button"><span class="row-label">Occasion</span><span class="row-value"><b id="val-occasion">Sangeet night</b><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></span></button>
+      <button class="row-card" id="row-length" type="button"><span class="row-label">Length</span><span class="row-value"><b id="val-length">2 hours</b><span class="dim" id="val-ends">· ends 11:15 PM</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></span></button>
+      <div class="card">
+        <h2>Who's dancing?</h2>
+        <p class="hint">Pick the sounds. Tap the star on one or two to make them the headliners.</p>
+        <div class="tile-grid" id="vibe-grid"></div>
+      </div>
+      <button class="row-card" id="row-crowd" type="button"><span class="row-label">The crowd</span><span class="row-value"><b id="val-crowd">Family-friendly</b><span class="dim" id="val-crowd2">· songs we know</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></span></button>
+      <div class="card" id="taste-card">
+        <h2>Your taste</h2>
+        <p class="hint" id="taste-text">Not loaded yet. Your DJ leans on the sounds you pick and what's popular.</p>
+        <div class="chips">
+          <button class="chip" id="btn-taste-library" type="button">Use my Apple Music</button>
+          <button class="chip" id="btn-taste-type" type="button">Type artists</button>
+          <button class="chip" id="btn-taste-clear" type="button" hidden>Forget</button>
+        </div>
+      </div>
+    </div>
+    <div class="cta"><button class="btn-primary wide" id="btn-plan" type="button">Plan my night</button></div>
+  </section>
+
+  <!-- 3 · The DJ's plan -->
+  <section class="screen" id="s-plan" hidden>
+    <nav class="nav"><button class="nav-btn" data-go="brief" type="button" aria-label="Back"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button><div class="nav-title"></div><button class="nav-text" id="btn-newtake" type="button">New take</button></nav>
+    <div class="scroll">
+      <div class="plan-hero">
+        <div class="mosaic big" id="plan-mosaic"></div>
+        <h1 id="plan-title">Sangeet night</h1>
+        <div class="sub" id="plan-meta">2 h 3 min · 47 songs · ends 11:15 PM</div>
+        <div class="plan-actions">
+          <button class="btn-primary" id="btn-start" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg><span>Start the night</span></button>
+          <button class="btn-round" id="btn-save" type="button" aria-label="Save to Apple Music"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+        </div>
+        <div class="status" id="plan-status"></div>
+      </div>
+      <div class="dj">
+        <div class="dj-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="1.6" class="fill"/></svg></div>
+        <div><div class="kicker">YOUR DJ</div><p id="dj-note"></p></div>
+      </div>
+      <div class="journey">
+        <svg id="journey-svg" viewBox="0 0 358 70" preserveAspectRatio="none" aria-label="How the energy moves across the night"></svg>
+        <div class="phases" id="journey-labels"></div>
+      </div>
+      <div class="section">
+        <div class="section-head"><h2>Opening with</h2><button class="link" data-go="songs" type="button" id="link-all">All songs</button></div>
+        <div id="plan-first"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 4 · Songs -->
+  <section class="screen" id="s-songs" hidden>
+    <nav class="nav"><button class="nav-btn" data-go="plan" type="button" aria-label="Back"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button><div class="nav-title" id="songs-title">47 songs</div><span class="nav-spacer"></span></nav>
+    <div class="phase-chips" id="phase-chips"></div>
+    <div class="scroll list" id="song-list"></div>
+    <div class="cta" id="songs-cta"><button class="btn-primary wide" id="btn-start2" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg>Start the night</button></div>
+  </section>
+
+  <!-- 5 · Now playing -->
+  <section class="screen playing" id="s-playing" hidden>
+    <div class="scroll np">
+      <button class="grabber" data-go="back" type="button" aria-label="Close"></button>
+      <div class="np-from"><span class="kicker">PLAYING</span><span id="np-set">Sangeet night</span></div>
+      <div class="np-art" id="np-art"></div>
+      <div class="np-title">
+        <div class="np-text"><div class="np-name" id="np-name">—</div><div class="np-artist" id="np-artist"></div></div>
+        <button class="icon-btn" id="btn-love" type="button" aria-label="Love this"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7-4.6-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.4-7 10-7 10z"/></svg></button>
+      </div>
+      <div class="np-progress"><div class="bar"><i id="np-bar"></i></div><div class="times"><span id="np-el">0:00</span><span id="np-rem">−0:00</span></div></div>
+      <div class="transport">
+        <button class="t-btn" id="btn-prev" type="button" aria-label="Previous"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6l-8.5 6L18 18zM6 6h2v12H6z"/></svg></button>
+        <button class="t-main" id="btn-play" type="button" aria-label="Pause"><svg viewBox="0 0 24 24" id="play-icon" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg></button>
+        <button class="t-btn" id="btn-next" type="button" aria-label="Next"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l8.5 6L6 18zM16 6h2v12h-2z"/></svg></button>
+      </div>
+      <button class="next-card" id="next-card" type="button">
+        <div class="cover sm" id="next-art"></div>
+        <div class="next-text"><div class="kicker" id="next-kicker">UP NEXT</div><div id="next-name">—</div></div>
+        <svg class="ring" viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="11"/><circle cx="14" cy="14" r="11" id="ring-fg" transform="rotate(-90 14 14)"/></svg>
+      </button>
+      <div class="steer-row" id="steer-row"></div>
+      <div class="np-mode" id="np-mode"></div>
+    </div>
+  </section>
+
+  <!-- 6 · Last night -->
+  <section class="screen" id="s-recap" hidden>
+    <nav class="nav"><button class="nav-btn" data-go="tonight" type="button" aria-label="Back"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg></button><div class="nav-title">Last night</div><span class="nav-spacer"></span></nav>
+    <div class="scroll">
+      <h1 id="recap-title">Sangeet night</h1>
+      <div class="sub" id="recap-meta"></div>
+      <div class="recap-card">
+        <div class="recap-mosaic" id="recap-mosaic"></div>
+        <div class="recap-body">
+          <div class="kicker" id="recap-kicker">THE FLOOR PEAKED AT 10:48</div>
+          <div class="recap-peak"><div class="cover md" id="recap-art"></div><div><div class="recap-song" id="recap-song">—</div><div class="sub" id="recap-artist"></div></div></div>
+          <div class="recap-stats" id="recap-stats"></div>
+          <div class="brand"><i></i>SELECTOR</div>
+        </div>
+      </div>
+      <div class="plan-actions">
+        <button class="btn-primary" id="btn-share" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 8l5-5 5 5M5 14v5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5"/></svg><span>Share the night</span></button>
+        <button class="btn-round" id="btn-again" type="button" aria-label="Play it again"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg></button>
+      </div>
+      <div class="saved-row" id="recap-saved" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/></svg><span>Saved to Apple Music as a playlist</span></div>
+    </div>
+  </section>
+
+  <!-- Mini player -->
+  <button class="mini" id="mini" type="button" hidden>
+    <div class="cover sm" id="mini-art"></div>
+    <div class="mini-text"><b id="mini-name">—</b><span id="mini-artist"></span></div>
+    <span class="mini-play" id="mini-play" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 5h4v14H7zM13 5h4v14h-4z"/></svg></span>
+  </button>
+
+  <!-- Sheets -->
+  <div class="backdrop" id="backdrop" hidden></div>
+
+  <div class="sheet" id="sheet-steer" hidden>
+    <div class="handle"></div>
+    <h2>Tell your DJ</h2>
+    <p class="hint">Changes land after the current song, so the floor never feels it.</p>
+    <div class="chips wrap" id="steer-chips"></div>
+    <div class="dj-reply" id="dj-reply" hidden><div class="dj-mark small" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="1.6" class="fill"/></svg></div><div><p id="dj-reply-text"></p><button class="link under" id="btn-undo" type="button">Undo</button></div></div>
+    <form class="ask-form" id="steer-form"><input id="steer-input" type="text" autocomplete="off" placeholder="Or say it your way: slow it down after this one" aria-label="Tell your DJ in your own words"><button class="send" type="submit" aria-label="Send"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg></button></form>
+  </div>
+
+  <div class="sheet" id="sheet-occasion" hidden>
+    <div class="handle"></div>
+    <h2>What's the occasion?</h2>
+    <div class="option-list" id="occasion-list"></div>
+  </div>
+
+  <div class="sheet" id="sheet-length" hidden>
+    <div class="handle"></div>
+    <h2>How long is the night?</h2>
+    <div class="option-list" id="length-list"></div>
+  </div>
+
+  <div class="sheet" id="sheet-crowd" hidden>
+    <div class="handle"></div>
+    <h2>The crowd</h2>
+    <div class="option-list" id="crowd-list"></div>
+  </div>
+
+  <div class="sheet" id="sheet-taste" hidden>
+    <div class="handle"></div>
+    <h2>Artists you love</h2>
+    <p class="hint">A few names, separated by commas. Your DJ also pulls in the artists DJs play alongside them.</p>
+    <form class="ask-form" id="taste-form"><input id="taste-input" type="text" autocomplete="off" placeholder="AP Dhillon, Thaman S, Fred again.." aria-label="Artists you love"><button class="send" type="submit" aria-label="Save"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l5 5 9-10"/></svg></button></form>
+  </div>
+
+  <div class="sheet" id="sheet-connect" hidden>
+    <div class="handle"></div>
+    <h2 id="connect-title">Apple Music</h2>
+    <p class="hint" id="connect-text"></p>
+    <div class="chips wrap" id="connect-actions"></div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
