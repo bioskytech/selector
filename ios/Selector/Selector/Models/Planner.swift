@@ -183,6 +183,11 @@ final class SetPlanner {
         }
     }
 
+    func vibe(_ key: String) -> Catalog.Vibe? {
+        guard let i = vibeIndex[key] else { return nil }
+        return cat.vibes[i]
+    }
+
     func vibeKey(of j: Int, in plan: Plan) -> String {
         let v = plan.pv[j]
         return v >= 0 && v < vibeKeys.count ? vibeKeys[v] : (vibeKeys.first ?? "pop")
