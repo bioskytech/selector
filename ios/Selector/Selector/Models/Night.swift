@@ -37,9 +37,9 @@ struct Settings: Codable {
 enum MatchState {
     case pending
     case missing
-    case found(Song)
+    case found(Track)
 
-    var song: Song? { if case .found(let s) = self { return s }; return nil }
+    var track: Track? { if case .found(let s) = self { return s }; return nil }
     var isPending: Bool { if case .pending = self { return true }; return false }
     var isMissing: Bool { if case .missing = self { return true }; return false }
 }
@@ -86,8 +86,16 @@ final class Night {
         self.createdAt = createdAt
     }
 
-    func song(at k: Int) -> Song? { k >= 0 && k < am.count ? am[k].song : nil }
-    var songs: [Song?] { am.map { $0.song } }
+    /// Bumped whenever positions shift or are re-planned, so slow lookups can tell their answer is stale.
+    var generation = 0
+    var inFlight: Set<Int> = []
+    var resolveAgain = false
+    var priority = 0
+    var skips: [Int] = []              // catalog track ids skipped early
+
+    func track(at k: Int) -> Track? { k >= 0 && k < am.count ? am[k].track : nil }
+    var tracks: [Track?] { am.map { $0.track } }
+    var pendingCount: Int { am.reduce(0) { $0 + ($1.isPending ? 1 : 0) } }
     var startOrNow: Date { startedAt ?? Fmt.roundedNow() }
 }
 

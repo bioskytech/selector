@@ -21,7 +21,12 @@ actor AppleMusicMatcher {
     }
 
     /// Returns the matching Apple Music song, or nil when the catalog has no good match.
-    func find(track j: Int, in cat: Catalog, clean: Bool) async -> Song? {
+    /// Throws when Apple Music itself can't be reached (no network, or MusicKit isn't set up).
+    func find(track j: Int, in cat: Catalog, clean: Bool) async throws -> Track? {
+        try await findSong(track: j, in: cat, clean: clean).map { Track(song: $0) }
+    }
+
+    private func findSong(track j: Int, in cat: Catalog, clean: Bool) async throws -> Song? {
         let t = cat.t
         let cacheKey = (clean ? "c:" : "") + t.id[j]
         if let known = cache[cacheKey] {
@@ -57,7 +62,7 @@ actor AppleMusicMatcher {
             }
             if bestScore >= 0.8 { break }
         }
-        guard searched else { return nil }   // network trouble: don't remember a miss
+        guard searched else { throw URLError(.cannotConnectToHost) }   // don't remember a miss
         let hit = bestScore >= 0.72 ? best : nil
         cache[cacheKey] = hit?.id.rawValue ?? ""
         persist()
@@ -66,7 +71,7 @@ actor AppleMusicMatcher {
     }
 
     private func search(_ term: String) async -> [Song]? {
-        for attempt in 0..<3 {
+        for attempt in 0..<2 {
             do {
                 var request = MusicCatalogSearchRequest(term: term, types: [Song.self])
                 request.limit = 10

@@ -7,7 +7,7 @@ struct PlayingView: View {
 
     private var tint: Color {
         guard let night = app.night, app.player.idx >= 0, app.player.idx < night.plan.seq.count else { return Theme.bg }
-        if let cg = night.song(at: app.player.idx)?.artwork?.backgroundColor { return Color.tint(from: cg) }
+        if let cg = night.track(at: app.player.idx)?.tint { return Color.tint(from: cg) }
         let key = app.planner?.vibeKey(of: night.plan.seq[app.player.idx], in: night.plan) ?? "pop"
         return Color.tint(fromHex: Vibes.hex(key))
     }

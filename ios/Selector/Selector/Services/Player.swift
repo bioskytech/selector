@@ -16,19 +16,29 @@ final class Player {
     var dur: Double = 0
     var fading = false
     var crossfade: Double = 6
+    /// Seconds to blend out of each position into the next; falls back to `crossfade`.
+    @ObservationIgnored var blends: [Double] = []
 
     /// Called when a new position starts, and when the last song ends.
     var onTrack: (@MainActor (Int) -> Void)?
     var onFinish: (@MainActor () -> Void)?
 
     @ObservationIgnored private let music = ApplicationMusicPlayer.shared
-    @ObservationIgnored private var songs: [Song?] = []
+    @ObservationIgnored private var songs: [Track?] = []
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var fadeTimer: Timer?
     @ObservationIgnored private var deckA = AVPlayer()
     @ObservationIgnored private var deckB = AVPlayer()
     @ObservationIgnored private var endObserver: NSObjectProtocol?
     @ObservationIgnored private var wasPlaying = false
+    @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
+    @ObservationIgnored private var resumeAfterInterruption = false
+
+    /// How long to blend out of position `k`.
+    func blend(after k: Int) -> Double {
+        guard crossfade > 0 else { return 0 }
+        return k >= 0 && k < blends.count ? blends[k] : crossfade
+    }
 
     static var supportsFullCrossfade: Bool {
         if #available(iOS 18.0, *) { return true }
@@ -40,7 +50,7 @@ final class Player {
 
     // MARK: Start / stop
 
-    func start(songs list: [Song?], at k: Int, mode newMode: Mode) async throws {
+    func start(songs list: [Track?], at k: Int, mode newMode: Mode) async throws {
         stop()
         guard k >= 0, k < list.count else { throw PlayerError.nothingToPlay }
         songs = list
@@ -48,7 +58,7 @@ final class Player {
         idx = k
         switch newMode {
         case .full:
-            let ids = list[k...].compactMap { $0 }
+            let ids = list[k...].compactMap { $0?.song }
             guard let first = ids.first else { throw PlayerError.nothingToPlay }
             music.queue = ApplicationMusicPlayer.Queue(for: ids, startingAt: first)
             applyTransition()
@@ -81,11 +91,26 @@ final class Player {
     }
 
     /// The plan changed after the current song: rebuild what's queued.
-    func update(songs list: [Song?]) async {
+    func update(songs list: [Track?]) async {
         songs = list
         guard mode != .none, idx >= 0, idx < list.count else { return }
         if mode == .full {
-            let ids = list[idx...].compactMap { $0 }
+            // First choice: swap what's queued after the current song, without touching what's playing.
+            let rest = list[(idx + 1)...].compactMap { $0?.song }
+            if let cur = music.queue.currentEntry,
+               let pos = music.queue.entries.firstIndex(where: { $0.id == cur.id }) {
+                do {
+                    let after = music.queue.entries.index(after: pos)
+                    if after < music.queue.entries.endIndex {
+                        music.queue.entries.removeSubrange(after..<music.queue.entries.endIndex)
+                    }
+                    if !rest.isEmpty { try await music.queue.insert(rest, position: .tail) }
+                    return
+                } catch {
+                    // Fall through to rebuilding the queue.
+                }
+            }
+            let ids = list[idx...].compactMap { $0?.song }
             guard let first = ids.first else { return }
             let t = music.playbackTime
             let keepPlaying = playing
@@ -171,7 +196,8 @@ final class Player {
 
     private func applyTransition() {
         if #available(iOS 18.0, *) {
-            music.transition = crossfade > 0 ? MusicPlayer.Transition.crossfade(duration: crossfade) : MusicPlayer.Transition.none
+            let d = blend(after: idx)
+            music.transition = d > 0 ? MusicPlayer.Transition.crossfade(duration: d) : MusicPlayer.Transition.none
         }
     }
 
@@ -197,10 +223,11 @@ final class Player {
         if let entry = music.queue.currentEntry, case .song(let song)? = entry.item {
             dur = song.duration ?? dur
             let id = song.id.rawValue
-            var k = songs.indices.first { $0 >= max(0, idx) && songs[$0]?.id.rawValue == id }
-            if k == nil { k = songs.indices.first { songs[$0]?.id.rawValue == id } }
+            var k = songs.indices.first { $0 >= max(0, idx) && songs[$0]?.id == id }
+            if k == nil { k = songs.indices.first { songs[$0]?.id == id } }
             if let k, k != idx {
                 idx = k
+                applyTransition()
                 onTrack?(k)
             }
         }
@@ -217,11 +244,29 @@ final class Player {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playback, mode: .default)
         try session.setActive(true)
+        if interruptionObserver == nil {
+            interruptionObserver = NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
+                let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+                let optionsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+                Task { @MainActor in
+                    guard let self, self.mode == .preview else { return }
+                    if raw == AVAudioSession.InterruptionType.began.rawValue {
+                        self.resumeAfterInterruption = self.deckA.rate > 0
+                        self.deckA.pause(); self.deckB.pause()
+                    } else if self.resumeAfterInterruption,
+                              AVAudioSession.InterruptionOptions(rawValue: optionsRaw).contains(.shouldResume) {
+                        try? AVAudioSession.sharedInstance().setActive(true)
+                        self.deckA.play()
+                        if self.fading { self.deckB.play() }
+                    }
+                }
+            }
+        }
     }
 
     private func previewURL(_ k: Int) -> URL? {
         guard k >= 0, k < songs.count, let s = songs[k] else { return nil }
-        return s.previewAssets?.first?.url
+        return s.previewURL
     }
 
     private func playPreview(_ k: Int) {
@@ -260,7 +305,8 @@ final class Player {
         let t = deckA.currentTime().seconds
         if t.isFinite { elapsed = max(0, t) }
         if let d = deckA.currentItem?.duration.seconds, d.isFinite, d > 0 { dur = d }
-        if !fading && crossfade > 0 && dur - elapsed <= crossfade && elapsed > 1 && previewURL(idx + 1) != nil && deckA.rate > 0 {
+        let length = min(blend(after: idx), 8)
+        if !fading && length > 0 && dur - elapsed <= length && elapsed > 1 && previewURL(idx + 1) != nil && deckA.rate > 0 {
             blendIntoNext()
         }
     }
@@ -276,14 +322,15 @@ final class Player {
         deckB.seek(to: .zero)
         deckB.play()
         let t0 = Date()
-        let length = crossfade
+        let length = max(1, min(blend(after: idx), 8))
         fadeTimer?.invalidate()
         fadeTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.fading else { return }
                 let p = min(1, Date().timeIntervalSince(t0) / length)
-                self.deckA.volume = Float(1 - p)
-                self.deckB.volume = Float(p)
+                // Equal-power curve: no dip in loudness mid-blend.
+                self.deckA.volume = Float(cos(p * .pi / 2))
+                self.deckB.volume = Float(sin(p * .pi / 2))
                 if p >= 1 { self.finishBlend(to: k) }
             }
         }
@@ -313,6 +360,19 @@ final class Player {
         playPreview(k)
         onTrack?(k)
     }
+
+    #if DEBUG
+    /// Screenshots: look like a night in progress without making a sound.
+    func simulate(songs list: [Track?], at k: Int, elapsed e: Double, dur d: Double) {
+        stop()
+        songs = list
+        mode = .preview
+        idx = k
+        playing = true
+        elapsed = e
+        dur = d
+    }
+    #endif
 
     private func finish() {
         let done = onFinish

@@ -69,7 +69,7 @@ struct Mosaic: View {
 extension AppState {
     /// Artwork for position `k` of the night, if Apple Music had it.
     func coverURL(_ k: Int, size: Int = 300) -> URL? {
-        night?.song(at: k)?.artwork?.url(width: size, height: size)
+        night?.track(at: k)?.artworkURL(size)
     }
 
     /// Placeholder colour for a catalog track: its sound, shaded a little by its id.

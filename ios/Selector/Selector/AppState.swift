@@ -37,8 +37,7 @@ final class AppState {
 
     let player = Player()
     @ObservationIgnored private let matcher = AppleMusicMatcher()
-    @ObservationIgnored private var resolveQueue: [Int] = []
-    @ObservationIgnored private var resolveClaimed: Set<Int> = []
+    @ObservationIgnored private let lookup = ITunesMatcher()
     @ObservationIgnored private var toastTask: Task<Void, Never>?
 
     init() {
@@ -58,9 +57,50 @@ final class AppState {
             say("Couldn't load the music data. \(error.localizedDescription)")
             return
         }
+        #if DEBUG
+        if let i = CommandLine.arguments.firstIndex(of: "-demo"), i + 1 < CommandLine.arguments.count {
+            await runDemo(CommandLine.arguments[i + 1])
+            return
+        }
+        #endif
         restoreNight()
         if authorized { await checkSubscription() }
     }
+
+    #if DEBUG
+    /// Screenshots: `-demo plan|songs|playing|steer|brief|recap|tonight` opens that screen with a real plan.
+    private func runDemo(_ screen: String) async {
+        demo = true
+        authorized = false
+        settings = Settings()
+        guard screen != "tonight", screen != "brief" else { if screen == "brief" { path = [.brief] }; return }
+        guard planNight(), let n = night else { return }
+        n.priority = screen == "plan" ? 0 : 6
+        // Give the lookup a little while to bring in artwork.
+        let deadline = Date().addingTimeInterval(22)
+        while Date() < deadline, n.pendingCount > n.plan.seq.count - 12 { try? await Task.sleep(nanoseconds: 300_000_000) }
+        switch screen {
+        case "plan": path = [.plan]
+        case "songs": path = [.plan, .songs]
+        case "playing", "steer":
+            n.startedAt = Date().addingTimeInterval(-1500)
+            n.played = Set(0...6)
+            player.simulate(songs: n.tracks, at: 6, elapsed: 84, dur: 212)
+            path = [.plan, .playing]
+            if screen == "steer" {
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                sheet = .steer
+                doSteer("up", nil)
+            }
+        case "recap":
+            n.startedAt = Date().addingTimeInterval(-7200)
+            n.played = Set(n.plan.seq.indices)
+            n.loved = Set(n.plan.seq.prefix(9))
+            finishNight()
+        default: break
+        }
+    }
+    #endif
 
     var current: Route? { path.last }
 
@@ -140,6 +180,7 @@ final class AppState {
     func planNight() -> Bool {
         guard let plan = newPlan() else { say("Pick at least one sound"); return false }
         player.stop()
+        musicKitOK = true
         let n = Night(plan: plan)
         night = n
         recap = nil
@@ -155,12 +196,9 @@ final class AppState {
         planNight()
     }
 
-    /// Ask for Apple Music once, then find every song so the plan shows real artwork.
+    /// Start finding songs right away so the plan shows real artwork.
     private func prepareNight(_ n: Night) async {
-        if MusicAuthorization.currentStatus == .notDetermined {
-            _ = await ensureAuthorized(quiet: true)
-        }
-        if authorized { await resolveNight(n) }
+        await resolveNight(n)
     }
 
     func clock(at k: Int) -> Date {
@@ -175,13 +213,26 @@ final class AppState {
 
     var planStatus: String {
         guard let night else { return "" }
-        if night.resolving { return "Finding your songs on Apple Music…" }
+        let n = night.plan.seq.count
+        if starting { return "Cueing up the first song…" }
+        if night.resolving {
+            let found = n - night.pendingCount
+            return found > 0 ? "Finding your songs… \(found) of \(n)" : "Finding your songs…"
+        }
         if !night.resolveNote.isEmpty { return night.resolveNote }
-        if night.resolved { return "All \(night.plan.seq.count) songs found on Apple Music." }
-        return authorized ? "" : "Allow Apple Music access to hear it."
+        if night.resolved { return source == .appleMusic ? "All \(n) songs found on Apple Music." : "All \(n) songs found." }
+        return ""
     }
 
     // MARK: Apple Music
+
+    /// Where songs are found: Apple Music when it's connected and working, otherwise Apple's
+    /// public lookup, which needs no sign-in and gives artwork and 30-second previews.
+    enum Source { case appleMusic, lookup }
+    var musicKitOK = true
+    var source: Source { authorized && musicKitOK ? .appleMusic : .lookup }
+    var starting = false
+    @ObservationIgnored var demo = false
 
     /// Asks for Apple Music access. With `quiet`, a refusal says nothing.
     func ensureAuthorized(quiet: Bool = false) async -> Bool {
@@ -189,7 +240,7 @@ final class AppState {
         let status = await MusicAuthorization.request()
         authorized = status == .authorized
         if !authorized && !quiet {
-            say("Selector needs Apple Music access to find and play songs. Allow it in Settings → Privacy & Security → Media & Apple Music.")
+            say("Allow Apple Music in Settings → Privacy & Security → Media & Apple Music.")
         }
         return authorized
     }
@@ -202,61 +253,130 @@ final class AppState {
         }
     }
 
-    /// Finds every song of the night on Apple Music, swapping in close fits when one is missing.
+    private enum ResolveOutcome { case done, stale, failed }
+
+    /// Finds every song of the night, swapping in close fits when one is missing.
+    /// Safe to call again while it runs: the running pass picks up whatever is still pending.
     func resolveNight(_ n: Night) async {
-        guard catalog != nil, planner != nil, authorized, !n.resolving else { return }
+        guard catalog != nil, planner != nil else { return }
+        if n.resolving { n.resolveAgain = true; return }
         n.resolving = true
         n.resolveNote = ""
-        resolveQueue = n.am.indices.filter { n.am[$0].isPending }
-        resolveClaimed = []
-        await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<4 {
-                group.addTask { @MainActor [weak self] in
-                    guard let self else { return }
-                    while !self.resolveQueue.isEmpty, self.night === n {
-                        let k = self.resolveQueue.removeFirst()
-                        await self.resolveOne(k, in: n)
+        var offline = false
+        repeat {
+            n.resolveAgain = false
+            let workers = source == .appleMusic ? 4 : 1
+            let failed = await withTaskGroup(of: Bool.self) { group -> Bool in
+                for _ in 0..<workers {
+                    group.addTask { @MainActor [weak self] in
+                        while let self, self.night === n, let k = self.nextPending(n) {
+                            if await self.resolveOne(k, in: n) == .failed { return true }
+                        }
+                        return false
                     }
                 }
+                var any = false
+                for await f in group { any = any || f }
+                return any
             }
-        }
+            if failed {
+                if musicKitOK && authorized {
+                    // Apple Music didn't answer (often: MusicKit isn't enabled for this build). Use the lookup.
+                    musicKitOK = false
+                    n.resolveAgain = true
+                } else {
+                    offline = true
+                }
+            }
+        } while night === n && !offline && (n.resolveAgain || n.pendingCount > 0)
         n.resolving = false
         guard night === n else { return }
-        let keep = n.am.indices.filter { n.am[$0].song != nil }
+        if offline {
+            n.resolveNote = "Can't reach Apple Music right now. Check your connection."
+            return
+        }
+        // Drop what couldn't be found, but never shift songs that already played.
+        let floor = player.isActive ? player.idx : -1
+        let keep = n.am.indices.filter { $0 <= floor || !n.am[$0].isMissing }
         let dropped = n.am.count - keep.count
         if dropped > 0 {
             n.plan.seq = keep.map { n.plan.seq[$0] }
             n.am = keep.map { n.am[$0] }
-            n.replaced = Set(n.replaced.filter { keep.contains($0) }.compactMap { keep.firstIndex(of: $0) })
+            n.replaced = Set(n.replaced.compactMap { keep.firstIndex(of: $0) })
+            n.generation += 1
+            n.inFlight = []
         }
-        n.resolved = true
-        n.resolveNote = dropped > 0
-            ? "\(dropped) song\(dropped > 1 ? "s" : "") wasn't on Apple Music, so your DJ replaced \(dropped > 1 ? "them" : "it")."
-            : ""
-        if player.isActive { await player.update(songs: n.songs) }
+        n.resolved = n.pendingCount == 0
+        if dropped > 0 {
+            n.resolveNote = "\(dropped) song\(dropped > 1 ? "s weren't" : " wasn't") available, so your DJ closed the gap."
+        }
+        await syncPlayer()
     }
 
-    private func resolveOne(_ k: Int, in n: Night) async {
-        guard let cat = catalog, let planner, k < n.plan.seq.count else { return }
+    /// The next position worth looking up: what plays soonest first.
+    private func nextPending(_ n: Night) -> Int? {
+        let count = n.am.count
+        guard count > 0 else { return nil }
+        let start = min(max(player.isActive ? player.idx : n.priority, 0), count - 1)
+        for off in 0..<count {
+            let k = (start + off) % count
+            if n.am[k].isPending && !n.inFlight.contains(k) {
+                n.inFlight.insert(k)
+                return k
+            }
+        }
+        return nil
+    }
+
+    private func find(_ j: Int, clean: Bool, from src: Source, in cat: Catalog) async throws -> Track? {
+        switch src {
+        case .appleMusic: return try await matcher.find(track: j, in: cat, clean: clean)
+        case .lookup: return try await lookup.find(track: j, in: cat, clean: clean)
+        }
+    }
+
+    private func resolveOne(_ k: Int, in n: Night) async -> ResolveOutcome {
+        guard let cat = catalog, let planner, k < n.plan.seq.count else { n.inFlight.remove(k); return .stale }
+        let gen = n.generation
+        let src = source
         let clean = n.plan.clean
         let j = n.plan.seq[k]
-        var hit = await matcher.find(track: j, in: cat, clean: clean)
-        var tried: Set<Int> = [j]
-        var tries = 0
-        while hit == nil && tries < 6 && night === n {
-            let exclude = tried.union(resolveClaimed).union(Set(n.plan.seq))
-            guard let alt = planner.alternative(n.plan, pos: k, exclude: exclude) else { break }
-            tried.insert(alt)
-            resolveClaimed.insert(alt)
-            hit = await matcher.find(track: alt, in: cat, clean: clean)
-            if hit != nil, k < n.plan.seq.count {
-                n.plan.seq[k] = alt
-                n.replaced.insert(k)
+        func fresh() -> Bool { night === n && n.generation == gen && k < n.plan.seq.count }
+        do {
+            var hit = try await find(j, clean: clean, from: src, in: cat)
+            guard fresh() else { return .stale }
+            var tried: Set<Int> = [j]
+            var tries = 0
+            while hit == nil && tries < (src == .appleMusic ? 6 : 2) {
+                let exclude = tried.union(Set(n.plan.seq))
+                guard let alt = planner.alternative(n.plan, pos: k, exclude: exclude) else { break }
+                tried.insert(alt)
+                hit = try await find(alt, clean: clean, from: src, in: cat)
+                guard fresh() else { return .stale }
+                if hit != nil, !n.plan.seq.contains(alt) {
+                    n.plan.seq[k] = alt
+                    n.replaced.insert(k)
+                } else {
+                    hit = nil
+                }
+                tries += 1
             }
-            tries += 1
+            n.inFlight.remove(k)
+            guard k < n.am.count else { return .stale }
+            if let hit { n.am[k] = .found(hit) } else { n.am[k] = .missing }
+            if player.mode == .preview { await player.update(songs: n.tracks) }
+            return .done
+        } catch {
+            if fresh() { n.inFlight.remove(k) }
+            return .failed
         }
-        guard k < n.am.count else { return }
-        if let hit { n.am[k] = .found(hit) } else { n.am[k] = .missing }
+    }
+
+    /// Hand the player the current plan: songs, and how long to blend each transition.
+    func syncPlayer() async {
+        guard let night, let planner else { return }
+        player.blends = planner.blendLengths(night.plan)
+        if player.isActive { await player.update(songs: night.tracks) }
     }
 
     // MARK: Starting the night
@@ -265,19 +385,46 @@ final class AppState {
         if night == nil { guard planNight() else { return } }
         guard let night else { return }
         if player.isActive { go(.playing); return }
-        guard await ensureAuthorized() else { return }
-        if night.resolving { say("Still finding your songs. One moment."); return }
-        if !night.resolved { await resolveNight(night) }
-        guard night.am.contains(where: { $0.song != nil }) else {
-            say("None of these songs are on Apple Music here. Try other sounds."); return
+        guard !starting else { return }
+        starting = true
+        defer { starting = false }
+
+        if MusicAuthorization.currentStatus == .notDetermined && !demo { _ = await ensureAuthorized(quiet: true) }
+        if authorized && subscribed == nil { await checkSubscription() }
+        var wantFull: Bool { authorized && subscribed == true && musicKitOK }
+        if wantFull {
+            // Songs found through the lookup can't play in full: find them again on Apple Music.
+            var changed = false
+            for i in night.am.indices where night.am[i].track != nil && night.am[i].track?.song == nil {
+                night.am[i] = .pending
+                changed = true
+            }
+            if changed { night.generation += 1; night.inFlight = []; night.resolved = false }
         }
-        if subscribed == nil { await checkSubscription() }
-        if subscribed == true {
-            await play(.full, from: k)
-        } else {
-            pendingStart = k
-            sheet = .connect
+        night.priority = min(max(k, 0), max(0, night.am.count - 1))
+        if night.pendingCount > 0 { Task { await resolveNight(night) } }
+
+        // Full songs wait for the whole night; previews start as soon as the first song is found.
+        let deadline = Date().addingTimeInterval(60)
+        while Date() < deadline, self.night === night {
+            let ready = wantFull
+                ? (night.pendingCount == 0 && !night.resolving)
+                : (night.priority < night.am.count && !night.am[night.priority].isPending) || (!night.resolving && night.pendingCount == 0)
+            if ready || (!night.resolving && !night.resolveNote.isEmpty && night.pendingCount > 0) { break }
+            try? await Task.sleep(nanoseconds: 120_000_000)
         }
+        guard self.night === night, !night.am.isEmpty else { return }
+        let full = wantFull && night.tracks.contains { $0?.song != nil }
+        let from = min(night.priority, night.am.count - 1)
+        let first = (from..<night.am.count).first { i in
+            guard let tr = night.am[i].track else { return false }
+            return full ? tr.song != nil : tr.previewURL != nil
+        }
+        guard let first else {
+            say(night.resolveNote.isEmpty ? "Couldn't find these songs right now. Try again in a moment." : night.resolveNote)
+            return
+        }
+        await play(full ? .full : .preview, from: first)
     }
 
     func play(_ mode: Player.Mode, from k: Int) async {
@@ -288,12 +435,39 @@ final class AppState {
             night.startedAt = Date().addingTimeInterval(-(k < st.count ? st[k] : 0))
         }
         player.crossfade = mode == .full ? (Player.supportsFullCrossfade ? 6 : 0) : 5
+        player.blends = planner.blendLengths(night.plan)
         do {
-            try await player.start(songs: night.songs, at: k, mode: mode)
+            try await player.start(songs: night.tracks, at: k, mode: mode)
             go(.playing)
         } catch {
-            say("Couldn't start playback. \(error.localizedDescription)")
+            if mode == .full {
+                // Apple Music refused: fall back to previews rather than silence.
+                musicKitOK = false
+                say("Apple Music couldn't play full songs, so here are previews.")
+                if let p = (k..<night.am.count).first(where: { night.am[$0].track?.previewURL != nil }),
+                   (try? await player.start(songs: night.tracks, at: p, mode: .preview)) != nil {
+                    go(.playing)
+                }
+            } else {
+                say("Couldn't start playback. \(error.localizedDescription)")
+            }
         }
+    }
+
+    /// From previews to full songs, once Apple Music is connected and subscribed.
+    func connectAppleMusic() async {
+        if MusicAuthorization.currentStatus == .denied || MusicAuthorization.currentStatus == .restricted {
+            if let url = URL(string: UIApplication.openSettingsURLString) { await UIApplication.shared.open(url) }
+            return
+        }
+        guard await ensureAuthorized() else { return }
+        await checkSubscription()
+        guard subscribed == true else { showOffer = true; return }
+        musicKitOK = true
+        sheet = nil
+        let k = max(0, player.idx)
+        player.stop()
+        await startNight(from: k)
     }
 
     /// Tap a row: start there, or jump there if the night is playing.
@@ -308,7 +482,7 @@ final class AppState {
     var modeText: String {
         switch player.mode {
         case .full: return Player.supportsFullCrossfade ? "Full songs from your Apple Music, blended." : "Full songs from your Apple Music. Blends need iOS 18."
-        case .preview: return "Preview mode: 30 seconds of each song, blended. Subscribe to Apple Music for full songs."
+        case .preview: return "Previews: 30 seconds of each song, blended."
         case .none: return ""
         }
     }
@@ -335,14 +509,10 @@ final class AppState {
         night.plan.seq[k] = alt
         night.am[k] = .pending
         night.replaced.remove(k)
-        guard authorized, let cat = catalog else { return }
-        Task {
-            let hit = await matcher.find(track: alt, in: cat, clean: night.plan.clean)
-            guard self.night === night, k < night.plan.seq.count, night.plan.seq[k] == alt else { return }
-            night.am[k] = hit.map { .found($0) } ?? .missing
-            if hit == nil { say("That one isn't on Apple Music. Swap again.") }
-            if player.isActive, k > player.idx { await player.update(songs: night.songs) }
-        }
+        night.generation += 1
+        night.inFlight = []
+        night.resolved = false
+        Task { await resolveNight(night) }
     }
 
     func removeAt(_ k: Int) {
@@ -355,7 +525,10 @@ final class AppState {
             if r > k { return r - 1 }
             return nil
         })
-        if player.isActive { Task { await player.update(songs: night.songs) } }
+        night.generation += 1
+        night.inFlight = []
+        if night.resolving { night.resolveAgain = true }
+        Task { await syncPlayer() }
     }
 
     // MARK: Live steering
@@ -437,6 +610,9 @@ final class AppState {
         night.plan.durS = durS
         night.am = Array(night.am.prefix(keep)) + Array(repeating: MatchState.pending, count: r.seq.count)
         night.replaced = Set(night.replaced.filter { $0 < keep })
+        night.generation += 1
+        night.inFlight = []
+        night.resolved = false
         night.requests.append(SteerRequest(action: action, arg: arg, at: Date()))
         if action == "up" {
             let t = planner.cat.t
@@ -447,8 +623,8 @@ final class AppState {
             }
         }
         Task {
-            if authorized { await resolveNight(night) }
-            await player.update(songs: night.songs)
+            await syncPlayer()
+            await resolveNight(night)
         }
         return reply
     }
@@ -463,10 +639,15 @@ final class AppState {
         night.plan.fam = u.fam
         night.plan.durS = u.durS
         night.undo = nil
+        night.generation += 1
+        night.inFlight = []
         if !night.requests.isEmpty { night.requests.removeLast() }
         steerReply = nil
         steerChosen = nil
-        Task { await player.update(songs: night.songs) }
+        Task {
+            await syncPlayer()
+            if night.pendingCount > 0 { await resolveNight(night) }
+        }
         say("Back to the earlier plan")
     }
 
@@ -552,7 +733,7 @@ final class AppState {
         let base = n.startOrNow
         let st = planner?.startTimes(plan) ?? []
         let seconds = played.isEmpty ? (planner?.totalSeconds(plan) ?? 0) : played.reduce(0.0) { $0 + Double(t?.dur[plan.seq[$1]] ?? 0) }
-        func art(_ k: Int) -> String? { n.song(at: k)?.artwork?.url(width: 600, height: 600)?.absoluteString }
+        func art(_ k: Int) -> String? { n.track(at: k)?.artworkURL(600)?.absoluteString }
         return Recap(id: n.createdAt.timeIntervalSince1970, title: plan.title, date: Fmt.weekday(base), seconds: seconds,
                      songs: pool.count, peakK: peakK, peakJ: plan.seq.isEmpty ? 0 : plan.seq[min(peakK, plan.seq.count - 1)],
                      peakAt: Fmt.clock(base.addingTimeInterval(peakK < st.count ? st[peakK] : 0)), peakArt: art(peakK),
@@ -581,16 +762,28 @@ final class AppState {
     func savePlaylist() async {
         guard let night else { return }
         guard await ensureAuthorized() else { return }
-        if !night.resolved && !night.resolving { await resolveNight(night) }
-        let list = night.songs.compactMap { $0 }
-        guard !list.isEmpty else { say("Nothing to save yet"); return }
+        // A playlist needs real Apple Music songs, not lookup results.
+        var changed = false
+        for i in night.am.indices where night.am[i].track != nil && night.am[i].track?.song == nil {
+            night.am[i] = .pending
+            changed = true
+        }
+        if changed { night.generation += 1; night.inFlight = []; night.resolved = false }
+        if night.pendingCount > 0 {
+            say("Finding these on Apple Music…")
+            await resolveNight(night)
+            let deadline = Date().addingTimeInterval(60)
+            while night.resolving, Date() < deadline { try? await Task.sleep(nanoseconds: 200_000_000) }
+        }
+        let list = night.tracks.compactMap { $0?.song }
+        guard !list.isEmpty else { say("Couldn't reach Apple Music to save this. Try again in a moment."); return }
         do {
             _ = try await MusicLibrary.shared.createPlaylist(
                 name: "Selector · \(night.plan.title)",
                 description: "Planned by your Selector DJ. \(night.plan.soundsByWeight.map { Vibes.name($0) }.joined(separator: ", ")).",
                 items: list)
             night.saved = true
-            say("Saved to your Apple Music library. In the Music app, turn on AutoMix for blended transitions.")
+            say("Saved to your Apple Music library.")
         } catch {
             say("Couldn't save the playlist. \(error.localizedDescription)")
         }
@@ -665,6 +858,6 @@ final class AppState {
         n.loved = Set(s.loved)
         n.saved = s.saved
         night = n
-        if authorized { Task { await resolveNight(n) } }
+        Task { await resolveNight(n) }
     }
 }

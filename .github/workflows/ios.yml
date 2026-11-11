@@ -3,24 +3,52 @@ on:
   push:
     paths: ["ios/**", ".github/workflows/ios.yml"]
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Pick Xcode 16
+      - name: Pick Xcode
         run: |
-          ls /Applications | grep -i xcode || true
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_26*.app | sort -V | tail -1)"
           xcodebuild -version
       - name: Build for the Simulator (no signing)
         run: |
           set -o pipefail
           cd ios/Selector
           xcodebuild -project Selector.xcodeproj -target Selector -sdk iphonesimulator -configuration Debug \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" ONLY_ACTIVE_ARCH=YES ARCHS=arm64 build 2>&1 | tee build.log | grep -E "error:|warning: unre|BUILD|Compiling|Linking" || true
-          if grep -q "BUILD SUCCEEDED" build.log; then exit 0; fi
-          echo "---- errors ----"; grep -E "error:" build.log | sort -u | head -80; exit 1
+            CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" ONLY_ACTIVE_ARCH=YES ARCHS=arm64 \
+            SYMROOT="$PWD/build" build > build.log 2>&1 || true
+          if grep -q "BUILD SUCCEEDED" build.log; then
+            grep -E "\.swift:[0-9]+:[0-9]+: warning" build.log | sed 's/.*Selector\/Selector\///' | sort -u | head -40
+            echo "BUILD SUCCEEDED"; exit 0
+          fi
+          echo "---- errors ----"; grep -E "error:" build.log | sed 's/.*Selector\/Selector\///' | sort -u | head -80; exit 1
+      - name: Screenshots
+        if: success()
+        run: |
+          set +e
+          APP="ios/Selector/build/Debug-iphonesimulator/Selector.app"
+          DEV=$(xcrun simctl list devices available | grep -E "iPhone 1[67] Pro \(" | head -1 | sed -E 's/.*\(([0-9A-F-]{36})\).*/\1/')
+          echo "device $DEV"; xcrun simctl boot "$DEV"; xcrun simctl bootstatus "$DEV" -b
+          xcrun simctl status_bar "$DEV" override --time "9:41" --batteryState charged --batteryLevel 100 --cellularBars 4 --wifiBars 3
+          xcrun simctl ui "$DEV" appearance dark
+          xcrun simctl install "$DEV" "$APP"
+          mkdir -p shots
+          for s in tonight brief plan songs playing steer recap; do
+            xcrun simctl terminate "$DEV" com.yourname.selector 2>/dev/null
+            xcrun simctl launch "$DEV" com.yourname.selector -demo $s
+            case $s in tonight|brief) sleep 7;; *) sleep 32;; esac
+            xcrun simctl io "$DEV" screenshot "shots/$s.png"
+          done
+          sips -Z 1300 shots/*.png >/dev/null
+          git fetch origin screenshots:screenshots 2>/dev/null
+          git config user.name "selector-ci"; git config user.email "ci@users.noreply.github.com"
+          mv shots /tmp/shots
+          git checkout --orphan shots-tmp && git rm -rfq . && cp /tmp/shots/*.png . && git add *.png
+          git commit -qm "Screenshots for $GITHUB_SHA" && git push -f origin shots-tmp:screenshots
       - uses: actions/upload-artifact@v4
         if: always()
         with:

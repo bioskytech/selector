@@ -234,6 +234,22 @@ final class SetPlanner {
         return de < -0.1 ? "Fade down" : "Echo out"
     }
 
+    /// How long to blend out of each song: long when the next one is in key and on tempo,
+    /// short when it's a hard switch. The last entry is unused.
+    func blendLengths(_ plan: Plan) -> [Double] {
+        let seq = plan.seq
+        return seq.indices.map { k in
+            guard k + 1 < seq.count else { return 4 }
+            switch transitionWord(seq[k], seq[k + 1]) {
+            case nil: return 10
+            case "Beat switch": return 6
+            case "Bass drop", "Bass swap": return 5
+            case "Speed up", "Loop and cut": return 3
+            default: return 2
+            }
+        }
+    }
+
     // MARK: Build
 
     struct BuildResult {
