@@ -4,6 +4,18 @@ Tell the DJ what tonight is. Selector plans the whole night, explains it in a se
 
 It runs in Safari or Chrome and installs to the iPhone home screen like an app.
 
+## How it mixes
+
+Previews are mixed, not just faded. For each song the app finds the beat grid in the audio, then picks a transition:
+
+- **Tempos within about 6%:** a beatmatched blend. The next song comes in at the same tempo, on the beat, with its bass cut; the bass swaps half way; the tempo then settles back.
+- **Further apart:** the outgoing song's tempo rides toward the next one, then it cuts on the beat and leaves as an echo.
+- **Too far, or no clear beat:** filter out, then the next song drops on its first beat.
+
+The playing screen shows the live tempo and key, and names the transition as it happens. If the browser can't read the preview audio, it falls back to a plain crossfade.
+
+Full Apple Music songs can't be mixed this way in any third-party app: Apple delivers them as a protected stream, with no access to tempo or EQ.
+
 ## It plays without any setup
 
 Open the site and press Start: it finds each song through Apple's public lookup and plays 30-second previews, blended on desktop and Android. No key, no sign-in.

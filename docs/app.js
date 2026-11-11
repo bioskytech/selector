@@ -481,6 +481,160 @@ async function resolveNight(night) {
   renderCurrentScreen();
 }
 
+/* ---------------- the mix: beatmatching, bass swaps, tempo rides, echo-outs ----------------
+   Previews are plain audio, so they can be mixed the way a DJ mixes: find each song's beat grid,
+   bring the next one in at the same tempo and on the beat with its bass cut, swap the bass
+   mid-phrase, and let the tempo settle. When two songs are too far apart to beatmatch, ride the
+   tempo toward the next one and cut on the beat with an echo, or filter out and drop.          */
+function analyzeBeats(buf, hint) {
+  const sr = buf.sampleRate, hop = Math.round(sr * 0.01), hopSec = hop / sr, frames = Math.floor(buf.length / hop);
+  const c0 = buf.getChannelData(0), c1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
+  const full = new Float32Array(frames), low = new Float32Array(frames), a = Math.exp(-2 * Math.PI * 150 / sr); let lp = 0;
+  for (let f = 0, i = 0; f < frames; f++) { let e = 0, el = 0; for (let h = 0; h < hop; h++, i++) { const x = c1 ? (c0[i] + c1[i]) * 0.5 : c0[i]; lp = (1 - a) * x + a * lp; e += x * x; el += lp * lp; } full[f] = Math.log1p(2000 * e / hop); low[f] = Math.log1p(8000 * el / hop); }
+  const onset = new Float32Array(frames); let mean = 0;
+  for (let f = 1; f < frames; f++) { const v = 2 * Math.max(0, low[f] - low[f - 1]) + Math.max(0, full[f] - full[f - 1]); onset[f] = v; mean += v; }
+  mean = mean / Math.max(1, frames) || 1e-9;
+  const flat = mean < 0.004;                                   // no hits to speak of (a drone, silence): there is no grid to find
+  const at = x => { const i = Math.round(x); return i >= 1 && i < frames - 1 ? Math.max(onset[i], 0.6 * onset[i - 1], 0.6 * onset[i + 1]) : 0; };
+  const score = bpm => { const per = 60 / bpm / hopSec; let best = -1, bph = 0; for (let ph = 0; ph < per; ph++) { let s = 0, n = 0; for (let x = ph; x < frames; x += per) { s += at(x); n++; } s /= Math.max(1, n); if (s > best) { best = s; bph = ph; } } return { s: best / mean, ph: bph, per }; };
+  const search = (lo, hi, step) => { let b = null; for (let bpm = lo; bpm <= hi; bpm += step) { const r = score(bpm); if (!b || r.s > b.s) b = { bpm, ...r }; } return b; };
+  let best = search(hint * 0.92, hint * 1.08, 0.05);
+  // the catalog tempo is usually right; when the audio clearly says otherwise, believe the audio
+  const wide = search(84, 176, 0.25); if (wide.s > Math.max(1.8, best.s * 1.5)) best = search(wide.bpm - 0.5, wide.bpm + 0.5, 0.05);
+  // refine the phase between frames, weighting by onset strength
+  let num = 0, den = 0; for (let x = best.ph; x < frames; x += best.per) { const i = Math.round(x); if (i < 1 || i >= frames - 1) continue; const w0 = onset[i - 1], w1 = onset[i], w2 = onset[i + 1], w = w0 + w1 + w2; if (w > 0) { num += (w2 - w0) / w * w1; den += w1; } }
+  const first = Math.max(0, (best.ph + (den ? num / den : 0)) * hopSec);
+  return { bpm: best.bpm, first, period: 60 / best.bpm, conf: flat ? 0 : best.s };
+}
+const Mix = {
+  ctx: null, out: null, delay: null, cur: null, inc: null, plan: null, timer: null, cache: new Map(), label: '', log: [], fails: 0,
+  init() {
+    if (this.ctx) return true;
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return false;
+    const c = this.ctx = new AC();
+    this.out = c.createDynamicsCompressor(); this.out.threshold.value = -6; this.out.ratio.value = 6; this.out.connect(c.destination);
+    this.delay = c.createDelay(2); const fb = c.createGain(); fb.gain.value = 0.5; const wet = c.createGain(); wet.gain.value = 0.7;
+    this.delay.connect(fb); fb.connect(this.delay); this.delay.connect(wet); wet.connect(this.out);
+    return true;
+  },
+  unlock() { if (this.init() && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {}); },
+  /* fetch + decode + find the beat grid; resolves null when the audio can't be read (then the plain player takes over) */
+  load(k) {
+    const m = Player.meta(k); if (!m || !m.preview || !NIGHT) return Promise.resolve(null);
+    if (this.cache.has(m.preview)) return this.cache.get(m.preview).promise;
+    const hint = T.bpm[NIGHT.plan.seq[k]], rec = { entry: null };
+    rec.promise = (async () => {
+      try {
+        const res = await fetch(m.preview, { mode: 'cors' }); if (!res.ok) throw new Error(res.status);
+        const ab = await res.arrayBuffer();
+        const buf = await new Promise((ok, no) => this.ctx.decodeAudioData(ab, ok, no));
+        rec.entry = { buf, ...analyzeBeats(buf, hint) }; return rec.entry;
+      } catch (e) { rec.failed = true; return null; }
+    })();
+    this.cache.set(m.preview, rec);
+    if (this.cache.size > 5) for (const key of this.cache.keys()) { if (this.cache.size <= 5) break; const cur = Player.meta(Player.idx), nx = Player.meta(Player.idx + 1); if (key !== m.preview && key !== (cur && cur.preview) && key !== (nx && nx.preview)) this.cache.delete(key); }
+    return rec.promise;
+  },
+  loaded(k) { const m = Player.meta(k), r = m && m.preview ? this.cache.get(m.preview) : null; return r ? r.entry : null; },
+  deck(entry, k) {
+    const c = this.ctx, src = c.createBufferSource(); src.buffer = entry.buf;
+    const low = c.createBiquadFilter(); low.type = 'lowshelf'; low.frequency.value = 180;
+    const hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 20; hp.Q.value = 0.9;
+    const gain = c.createGain(), send = c.createGain(); send.gain.value = 0;
+    src.connect(low); low.connect(hp); hp.connect(gain); gain.connect(this.out); hp.connect(send); send.connect(this.delay);
+    return { entry, k, src, low, hp, gain, send, pos: 0, last: 0, started: false };
+  },
+  kill(d, when) { if (!d) return; try { d.src.stop(when || 0); } catch (e) {} const off = () => { try { d.gain.disconnect(); d.send.disconnect(); } catch (e) {} }; if (when) setTimeout(off, Math.max(0, (when - this.ctx.currentTime) * 1000) + 3000); else off(); },
+  /* can this night be mixed? true once the song at k has been fetched and analysed */
+  async ready(k) { if (!this.init()) return false; const e = await Promise.race([this.load(k), new Promise(r => setTimeout(() => r(null), 9000))]); return !!e; },
+  async playFrom(k) {
+    this.cancel(); this.kill(this.cur); this.cur = null;
+    // the lookup may still be finding this one: give it a moment
+    for (let w = 0; w < 50 && NIGHT && Player.meta(k) === undefined && Player.mode === 'mix' && Player.idx === k; w++) await new Promise(r => setTimeout(r, 120));
+    const known = NIGHT && Player.meta(k);
+    const e = await this.load(k); if (Player.mode !== 'mix' || Player.idx !== k) return;
+    if (!e) {
+      if (known && known.preview && ++this.fails >= 2) { Player.mode = 'preview'; Player.ensureAudio(); Player.playPreview(k); renderNowPlaying(); return; }   // the audio can't be read here: plain player
+      Player.advance(); return;
+    }
+    this.fails = 0;
+    const d = this.deck(e, k), t = this.ctx.currentTime + 0.06; d.src.start(t, 0); d.t0 = t; d.pos = 0; d.last = t; this.cur = d; this.label = '';
+    Player.dur = e.buf.duration; Player.elapsed = 0; Player.playing = this.ctx.state === 'running';
+    this.load(k + 1);
+    clearInterval(this.timer); this.timer = setInterval(() => this.tick(), 80);
+  },
+  rate(d) { return d.src.playbackRate.value || 1; },
+  tick() {
+    const d = this.cur; if (!d || Player.mode !== 'mix' || !NIGHT) return;
+    const now = this.ctx.currentTime;
+    for (const x of [d, this.inc]) if (x) { if (now > x.t0) x.pos += (now - Math.max(x.last, x.t0)) * this.rate(x); x.last = now; }
+    if (this.plan && now >= this.plan.swapAt) { const p = this.plan, old = d; this.cur = this.inc; this.inc = null; this.plan = null; this.kill(old, now + 0.2); Player.fading = false; this.label = ''; Player.dur = this.cur.entry.buf.duration; Player.elapsed = this.cur.pos; Player.onTrack(p.k); this.load(p.k + 1); return; }
+    Player.playing = this.ctx.state === 'running'; Player.elapsed = d.pos; Player.dur = d.entry.buf.duration;
+    Player.fading = !!(this.plan && now >= this.plan.tS);
+    const remaining = (d.entry.buf.duration - d.pos) / this.rate(d);
+    if (!this.plan) {
+      const k = d.k + 1;
+      if (k < NIGHT.plan.seq.length && Player.meta(k) === undefined) { /* still being looked up */ }
+      else if (k < NIGHT.plan.seq.length) this.load(k);
+      const e = k < NIGHT.plan.seq.length ? this.loaded(k) : null;
+      if (e && remaining <= 16 * d.entry.period / this.rate(d) + 1.4) this.schedule(e, k, remaining);
+      else if (remaining <= 0.06) { clearInterval(this.timer); Player.advance(); return; }
+    }
+    renderProgress();
+  },
+  /* decide how to get from the song that's on to the next one, and schedule it sample-accurately */
+  schedule(e, k, remaining) {
+    const c = this.ctx, now = c.currentTime, o = this.cur, rO = this.rate(o), oe = o.entry;
+    const beatO = oe.period / rO, outBpm = oe.bpm * rO;
+    const beatAt = n => now + (oe.first + n * oe.period - o.pos) / rO;                 // when the outgoing song's nth beat sounds
+    const nFrom = t => Math.ceil(((t - now) * rO + o.pos - oe.first) / oe.period);
+    const end = now + remaining - 0.12;
+    let rI = outBpm / e.bpm; for (const f of [0.5, 2]) if (Math.abs(rI * f - 1) < Math.abs(rI - 1)) rI *= f;
+    const gap = Math.abs(rI - 1) * 100, sure = oe.conf >= 2.2 && e.conf >= 2.2;
+    const inc = this.deck(e, k); let plan = null;
+    // a blend of about eight seconds: 16 beats at club tempo, 8 when the song is slow or there's little of it left
+    for (const beats of (sure && gap <= 6.5 ? (16 * beatO <= 8.5 ? [16, 8, 4] : [8, 4]) : [])) {
+      // the last beat of the outgoing song that still leaves room for the whole blend
+      const n0 = Math.floor(((end - beats * beatO - now) * rO + o.pos - oe.first) / oe.period), tS = beatAt(n0), tE = tS + beats * beatO, tSwap = tS + (beats / 2) * beatO;
+      if (tS < now + 0.2) continue;
+      // beatmatched blend: same tempo, on the beat, bass cut; swap the bass half way; let the tempo settle afterwards
+      inc.src.playbackRate.setValueAtTime(rI, now); inc.src.start(tS, e.first); inc.t0 = tS; inc.pos = e.first;
+      inc.gain.gain.setValueAtTime(0, now); inc.gain.gain.setValueAtTime(0, tS); inc.gain.gain.linearRampToValueAtTime(1, tS + Math.min(4, beats / 4) * beatO);
+      inc.low.gain.setValueAtTime(-30, now); inc.low.gain.setValueAtTime(-30, tSwap - 0.02); inc.low.gain.linearRampToValueAtTime(0, tSwap + 0.03);
+      o.low.gain.setValueAtTime(0, tSwap - 0.02); o.low.gain.linearRampToValueAtTime(-30, tSwap + 0.03);
+      o.gain.gain.setValueAtTime(1, tSwap); o.gain.gain.linearRampToValueAtTime(0, tE);
+      o.hp.frequency.setValueAtTime(20, tSwap); o.hp.frequency.exponentialRampToValueAtTime(900, tE);
+      if (Math.abs(rI - 1) > 0.004) { inc.src.playbackRate.setValueAtTime(rI, tE); inc.src.playbackRate.linearRampToValueAtTime(1, tE + 10); }
+      let err = 0; for (let b = 0; b < beats; b++) err = Math.max(err, Math.abs((tS + b * (e.period / rI)) - beatAt(n0 + b)));
+      plan = { k, type: 'blend', tS, swapAt: tE, label: `Beatmatched at ${Math.round(outBpm)} BPM, swapping the bass`, beats, rI, err };
+      break;
+    }
+    if (!plan) {
+      const tCut = Math.max(now + 0.3, beatAt(nFrom(end - 0.35))), ride = sure && gap > 1.5 && gap <= 14, echo = sure && gap <= 1.5;
+      if (ride) { const target = rO * clamp(1 / rI, 0.92, 1.08), t0 = Math.max(now + 0.05, tCut - 6); o.src.playbackRate.setValueAtTime(rO, t0); o.src.playbackRate.linearRampToValueAtTime(target, tCut); }
+      else if (!echo) { const t0 = Math.max(now + 0.05, tCut - 4); o.hp.frequency.setValueAtTime(20, t0); o.hp.frequency.exponentialRampToValueAtTime(1800, tCut); }
+      // cut on the beat: the outgoing song leaves as an echo, the new one lands on its first beat at full weight
+      this.delay.delayTime.setValueAtTime(clamp(beatO * 0.75, 0.15, 1.2), now);
+      o.send.gain.setValueAtTime(0, Math.max(now, tCut - 2 * beatO)); o.send.gain.linearRampToValueAtTime(0.9, tCut - 0.02); o.send.gain.linearRampToValueAtTime(0, tCut + 0.08);
+      o.gain.gain.setValueAtTime(1, tCut - 0.03); o.gain.gain.linearRampToValueAtTime(0, tCut + 0.02);
+      inc.src.start(tCut, e.first); inc.t0 = tCut; inc.pos = e.first; inc.gain.gain.setValueAtTime(1, now);
+      plan = { k, type: ride ? 'ride' : echo ? 'echo' : 'drop', tS: Math.max(now, tCut - (ride ? 6 : echo ? 1 : 4)), swapAt: tCut + 0.04, label: echo ? 'Echo out, in on the beat' : ride ? (e.bpm > outBpm ? `Speeding up to ${Math.round(e.bpm)} BPM, then an echo out` : `Slowing down to ${Math.round(e.bpm)} BPM, then an echo out`) : 'Filtering out, then the drop', rI, gap };
+    }
+    inc.last = now; this.inc = inc; this.plan = plan; this.label = plan.label;
+    this.log.push({ k, type: plan.type, from: +outBpm.toFixed(1), to: +e.bpm.toFixed(1), rate: +(plan.rI || 1).toFixed(4), beats: plan.beats || 0, alignMs: plan.err !== undefined ? +(plan.err * 1000).toFixed(1) : null, conf: [+oe.conf.toFixed(1), +e.conf.toFixed(1)] });
+  },
+  /* the plan changed, or the listener skipped: drop anything scheduled but not yet audible */
+  cancel() {
+    if (!this.plan && !this.inc) return;
+    const now = this.ctx.currentTime, o = this.cur;
+    this.kill(this.inc); this.inc = null; this.plan = null; this.label = ''; Player.fading = false;
+    if (o) for (const p of [o.gain.gain, o.low.gain, o.hp.frequency, o.send.gain, o.src.playbackRate]) { const v = p.value; p.cancelScheduledValues(now); p.setValueAtTime(v, now); }
+    if (o) { o.gain.gain.linearRampToValueAtTime(1, now + 0.2); o.low.gain.linearRampToValueAtTime(0, now + 0.2); o.hp.frequency.linearRampToValueAtTime(20, now + 0.2); o.send.gain.setValueAtTime(0, now); }
+  },
+  stop() { clearInterval(this.timer); if (!this.ctx) return; this.kill(this.inc); this.kill(this.cur); this.inc = this.cur = this.plan = null; this.label = ''; },
+  now() { const d = this.cur; return d ? { bpm: d.entry.bpm * this.rate(d), conf: d.entry.conf } : null; },
+};
+
 /* ---------------- playback ---------------- */
 const Player = {
   mode: 'none', idx: -1, playing: false, elapsed: 0, dur: 0, loved: false, a: null, b: null, fading: false, timer: null, xf: isIOS ? 0 : 4,
@@ -493,12 +647,17 @@ const Player = {
     if (mode === 'full') {
       const ids = NIGHT.am.slice(k).map(m => m && m.id).filter(Boolean);
       try { await AM.music.setQueue({ songs: ids }); await AM.music.play(); } catch (e) { toast("Couldn't start Apple Music playback"); return; }
+    } else if (mode === 'mix') {
+      this.dur = 30; this.elapsed = 0; this.playing = true; Mix.playFrom(k);
     } else if (mode === 'preview') {
       this.ensureAudio(); this.playPreview(k);
     } else { this.dur = T.dur[NIGHT.plan.seq[k]]; this.elapsed = 0; this.playing = true; this.startDemoClock(); }
     this.onTrack(k);
   },
+  /* how far the night is committed: the song that's on, or the next one once it has started blending in */
+  committed() { return this.mode === 'none' ? -1 : this.idx + (this.fading ? 1 : 0); },
   unlock() {
+    Mix.unlock();
     this.ensureAudio();
     const silent = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
     for (const el of [this.a, this.b]) { try { el.src = silent; const p = el.play(); if (p && p.then) p.then(() => el.pause()).catch(() => {}); } catch (e) {} }
@@ -538,7 +697,7 @@ const Player = {
   },
   onPreviewEnded(el) { if (el === this.a && !this.fading) this.advance(); },
   startDemoClock() { clearInterval(this.timer); this.timer = setInterval(() => { if (!this.playing) return; this.elapsed += 6; if (this.elapsed >= this.dur) this.advance(); else renderProgress(); }, 1000); },
-  advance() { if (!NIGHT) return; if (this.idx + 1 >= NIGHT.plan.seq.length) { this.finish(); return; } const k = this.idx + 1; if (this.mode === 'preview') { this.idx = k; this.playPreview(k); this.onTrack(k); } else if (this.mode === 'demo') { this.idx = k; this.dur = T.dur[NIGHT.plan.seq[k]]; this.elapsed = 0; this.onTrack(k); } },
+  advance() { if (!NIGHT) return; if (this.idx + 1 >= NIGHT.plan.seq.length) { this.finish(); return; } const k = this.idx + 1; if (this.mode === 'mix') { this.idx = k; Mix.playFrom(k); this.onTrack(k); } else if (this.mode === 'preview') { this.idx = k; this.playPreview(k); this.onTrack(k); } else if (this.mode === 'demo') { this.idx = k; this.dur = T.dur[NIGHT.plan.seq[k]]; this.elapsed = 0; this.onTrack(k); } },
   onTrack(k) {
     this.idx = k; NIGHT.played.add(k);
     const j = NIGHT.plan.seq[k];
@@ -551,20 +710,22 @@ const Player = {
   },
   async toggle() {
     if (this.mode === 'full') { if (this.playing) AM.music.pause(); else { try { await AM.music.play(); } catch (e) {} } }
+    else if (this.mode === 'mix') { if (Mix.ctx.state === 'running') await Mix.ctx.suspend(); else await Mix.ctx.resume(); this.playing = Mix.ctx.state === 'running'; renderTransport(); }
     else if (this.mode === 'preview') { if (this.playing) this.a.pause(); else this.a.play().catch(() => {}); }
     else { this.playing = !this.playing; renderTransport(); }
   },
-  async next() { if (this.mode === 'full') { try { await AM.music.skipToNextItem(); } catch (e) {} } else { this.fading = false; if (this.b) { this.b.pause(); } this.advance(); } },
-  async prev() { if (this.elapsed > 5) { this.seek(0); return; } if (this.mode === 'full') { try { await AM.music.skipToPreviousItem(); } catch (e) {} } else if (this.idx > 0) { const k = this.idx - 1; if (this.mode === 'preview') { this.fading = false; this.playPreview(k); } else { this.dur = T.dur[NIGHT.plan.seq[k]]; this.elapsed = 0; } this.onTrack(k); } },
+  async next() { if (this.mode === 'full') { try { await AM.music.skipToNextItem(); } catch (e) {} } else if (this.mode === 'mix') { if (Mix.ctx.state !== 'running') await Mix.ctx.resume(); this.fading = false; this.advance(); } else { this.fading = false; if (this.b) { this.b.pause(); } this.advance(); } },
+  async prev() { if (this.mode === 'mix') { const k = this.elapsed > 5 || this.idx === 0 ? this.idx : this.idx - 1; this.idx = k; this.fading = false; Mix.playFrom(k); this.onTrack(k); return; } if (this.elapsed > 5) { this.seek(0); return; } if (this.mode === 'full') { try { await AM.music.skipToPreviousItem(); } catch (e) {} } else if (this.idx > 0) { const k = this.idx - 1; if (this.mode === 'preview') { this.fading = false; this.playPreview(k); } else { this.dur = T.dur[NIGHT.plan.seq[k]]; this.elapsed = 0; } this.onTrack(k); } },
   seek(t) { if (this.mode === 'full') AM.music.seekToTime(t); else if (this.mode === 'preview') this.a.currentTime = t; else this.elapsed = t; },
   /* the plan changed after the current song: rebuild what's queued */
   async requeue() {
     if (this.mode === 'full') { const k = this.idx, t = AM.music.currentPlaybackTime || 0, wasPlaying = this.playing; const ids = NIGHT.am.slice(k).map(m => m && m.id).filter(Boolean); try { await AM.music.setQueue({ songs: ids }); await AM.music.seekToTime(t); if (wasPlaying) await AM.music.play(); } catch (e) {} }
+    else if (this.mode === 'mix') { if (Mix.plan && Mix.ctx.currentTime < Mix.plan.tS) Mix.cancel(); Mix.load(this.committed() + 1); }
     else if (this.mode === 'preview') { const nx = this.meta(this.idx + 1); if (nx && nx.preview && this.b) { this.b.src = nx.preview; this.b.load(); } }
     renderNowPlaying();
   },
   stop(silent) {
-    clearInterval(this.timer); this.fading = false;
+    clearInterval(this.timer); this.fading = false; Mix.stop();
     if (this.mode === 'full' && AM.music) { try { AM.music.stop(); } catch (e) {} }
     if (this.a) { this.a.pause(); this.b.pause(); }
     this.mode = 'none'; this.playing = false; this.idx = -1; this.elapsed = 0;
@@ -608,7 +769,7 @@ function endsAt(minutes) { return fmtClock(new Date(roundedNow() + minutes * 600
 
 function swapAt(k) {
   const plan = NIGHT.plan;
-  if (Player.mode !== 'none' && k <= Player.idx) { toast('That one already played'); return; }
+  if (Player.mode !== 'none' && k <= Player.committed()) { toast(k > Player.idx ? "That one's already blending in" : 'That one already played'); return; }
   const tried = NIGHT.swaps?.[k] || new Set([plan.seq[k]]);
   const alt = alternative(plan, k, tried);
   if (alt < 0) { toast('No other song fits this spot'); return; }
@@ -620,7 +781,7 @@ function swapAt(k) {
   if (Player.mode === 'demo' && k > Player.idx) Player.requeue();
 }
 function removeAt(k) {
-  if (Player.mode !== 'none' && k <= Player.idx) { toast('That one already played'); return; }
+  if (Player.mode !== 'none' && k <= Player.committed()) { toast(k > Player.idx ? "That one's already blending in" : 'That one already played'); return; }
   NIGHT.plan.seq.splice(k, 1); NIGHT.am.splice(k, 1);
   renderCurrentScreen(); if (Player.mode !== 'none') Player.requeue();
 }
@@ -767,7 +928,7 @@ function planFromText(text) {
 function tracksBy(name) { return byArtist.get(normA(name)) || []; }
 function steer(intents) {
   if (!NIGHT || !intents.length) return '';
-  const plan = NIGHT.plan, cur = Player.mode !== 'none' ? Player.idx : -1;
+  const plan = NIGHT.plan, cur = Player.committed();
   const keep = Math.min(cur + 1, plan.seq.length);                 // songs that stay: played + the one playing
   const prefix = plan.seq.slice(0, keep);
   const st = startTimes(plan); let elapsed = keep < plan.seq.length ? st[keep] : totalSeconds(plan);
@@ -810,7 +971,7 @@ function steer(intents) {
 function undoSteer() {
   if (!NIGHT || !NIGHT.undo) return;
   // only what hasn't played yet goes back; the song that's on stays on
-  const u = NIGHT.undo, plan = NIGHT.plan, keep = Math.min(Math.max(Player.mode !== 'none' ? Player.idx + 1 : 0, 0), Math.min(u.seq.length, plan.seq.length));
+  const u = NIGHT.undo, plan = NIGHT.plan, keep = Math.min(Math.max(Player.committed() + 1, 0), Math.min(u.seq.length, plan.seq.length));
   const played = plan.seq.slice(0, keep), idx = u.seq.map((_, i) => i).slice(keep).filter(i => !played.includes(u.seq[i]));
   const oldPv = plan.pv;
   plan.seq = played.concat(idx.map(i => u.seq[i])); NIGHT.am = NIGHT.am.slice(0, keep).concat(idx.map(i => u.am[i]));
@@ -1018,7 +1179,7 @@ function renderNowPlaying() {
     $('#next-name').textContent = T.n[nj];
   } else { $('#next-card').hidden = true; }
   $('#steer-row').innerHTML = steerChips(true).map((c, i) => `<button class="chip light" type="button" data-chip="${i}">${esc(c.label)}</button>`).join('');
-  $('#np-mode').textContent = Player.mode === 'full' ? (isIOS ? 'Full songs from your Apple Music. Keep Selector open to hear the whole night.' : 'Full songs from your Apple Music.') : Player.mode === 'preview' ? `Previews: 30 seconds of each song${Player.xf ? ', blended' : ''}.${hasApple() ? ' Connect Apple Music for full songs.' : ''}` : 'Demo: the clock runs six times faster than the music would.';
+  $('#np-mode').textContent = Player.mode === 'full' ? (isIOS ? 'Full songs from your Apple Music. Keep Selector open to hear the whole night.' : 'Full songs from your Apple Music.') : Player.mode === 'mix' ? 'Previews, mixed live: beatmatched, with bass swaps and echo-outs.' : Player.mode === 'preview' ? `Previews: 30 seconds of each song${Player.xf ? ', blended' : ''}.${hasApple() ? ' Connect Apple Music for full songs.' : ''}` : 'Demo: the clock runs six times faster than the music would.';
   renderTransport(); renderProgress(); renderMini();
 }
 function steerChips(short) {
@@ -1037,7 +1198,10 @@ function renderProgress() {
   $('#np-el').textContent = fmtT(e); $('#np-rem').textContent = '-' + fmtT(Math.max(0, d - e));
   const rem = Math.max(0, d - e), xf = Player.mode === 'preview' ? Player.xf : 0, blending = Player.fading || (xf > 0 && rem <= xf + 0.5);
   const k = Player.idx, seq = NIGHT ? NIGHT.plan.seq : [], w = seq[k + 1] !== undefined ? transitionWord(seq[k], seq[k + 1]) : '';
-  const nl = $('#next-kicker'); nl.textContent = blending ? 'Blending in now' : `Next, ${w ? w.toLowerCase() : 'a smooth blend'} in ${fmtT(rem)}`; nl.classList.toggle('hot', blending);
+  const nl = $('#next-kicker'), mixing = Player.mode === 'mix' && Mix.label;
+  nl.textContent = mixing ? Mix.label : blending ? 'Blending in now' : `Next, ${w ? w.toLowerCase() : 'a smooth blend'} in ${fmtT(rem)}`; nl.classList.toggle('hot', !!mixing || blending);
+  const mn = Player.mode === 'mix' ? Mix.now() : null, j = seq[k];
+  $('#np-deck').textContent = j === undefined ? '' : `${Math.round(mn ? mn.bpm : T.bpm[j])} BPM, key ${CAMN[j]}${CAML[j] ? 'B' : 'A'}`;
 }
 function renderMini() {
   const m = $('#mini'); const show = Player.mode !== 'none' && current !== 'playing' && NIGHT && Player.idx >= 0;
@@ -1084,6 +1248,8 @@ function openSheet(id) { closeSheets(); $('#backdrop').hidden = false; $('#' + i
 function closeSheets() { $('#backdrop').hidden = true; $$('.sheet').forEach(s => { s.hidden = true; }); }
 
 /* ---------------- flows ---------------- */
+/* previews: mixed like a DJ when the audio can be read, plainly crossfaded when it can't */
+async function startPreviews(k) { const mixed = await Mix.ready(k); await Player.start(k, mixed ? 'mix' : 'preview'); }
 async function startNight(fromK = 0) {
   if (!NIGHT) { if (!planNight()) return; }
   if (Player.mode !== 'none') { go('playing'); return; }
@@ -1100,7 +1266,7 @@ async function startNight(fromK = 0) {
     if (NIGHT !== night) return;
     let first = -1; for (let k = fromK; k < night.am.length; k++) if (night.am[k] && night.am[k].preview) { first = k; break; }
     if (first < 0) { toast("Couldn't reach the song lookup, so this is a silent run-through."); await Player.start(fromK, 'demo'); go('playing'); return; }
-    await Player.start(first, 'preview'); go('playing'); return;
+    await startPreviews(first); go('playing'); return;
   }
   if (!AM.ready) { toast(AM.failed ? 'Apple Music failed to start: ' + AM.failed : 'Apple Music is still loading, one moment'); return; }
   if (NIGHT.resolving) { toast('Still finding your songs. One moment.'); return; }
@@ -1175,7 +1341,7 @@ function bind() {
     const sw = e.target.closest('[data-swap]'); if (sw) { closeSwipes(); swapAt(+sw.dataset.swap); return; }
     const rm = e.target.closest('[data-remove]'); if (rm) { closeSwipes(); removeAt(+rm.dataset.remove); return; }
     const more = e.target.closest('[data-more]'); if (more) { e.stopPropagation(); const w = more.closest('.swipe'); const open = w.classList.contains('open'); closeSwipes(); w.classList.toggle('open', !open); return; }
-    const row = e.target.closest('.song'); if (row && !row.closest('.swipe.open')) { const k = +row.dataset.k; if (Player.mode !== 'none') { Player.start(k, Player.mode).then(() => go('playing')); } else startNight(k); }
+    const row = e.target.closest('.song'); if (row && !row.closest('.swipe.open')) { const k = +row.dataset.k; if (Player.mode !== 'none') { if (Player.mode === 'mix' && !Mix.loaded(k) && !(NIGHT.am[k] && NIGHT.am[k].preview)) { toast('Still finding that one'); return; } Player.start(k, Player.mode).then(() => go('playing')); } else startNight(k); }
   });
   bindSwipe($('#song-list'));
   $('#btn-play').addEventListener('click', () => Player.toggle());
@@ -1189,7 +1355,7 @@ function bind() {
   $('#btn-undo').addEventListener('click', () => { undoSteer(); $('#dj-reply').hidden = true; $$('#steer-chips .chip').forEach(c => c.classList.remove('on')); toast('Back to the earlier plan'); });
   $('#mini').addEventListener('click', e => { if (e.target.closest('#mini-play')) { Player.toggle(); return; } go('playing'); });
   $('#mini-play').addEventListener('click', e => { e.stopPropagation(); Player.toggle(); });
-  $('#connect-actions').addEventListener('click', async e => { const b = e.target.closest('[data-connect]'); if (!b) return; if (b.dataset.connect === 'full') { if (!await authorize()) return; if (!AM.subscribed) { openConnect(); return; } closeSheets(); await Player.start(pendingStart, 'full'); go('playing'); } else { closeSheets(); await Player.start(pendingStart, 'preview'); go('playing'); } });
+  $('#connect-actions').addEventListener('click', async e => { const b = e.target.closest('[data-connect]'); if (!b) return; if (b.dataset.connect === 'full') { if (!await authorize()) return; if (!AM.subscribed) { openConnect(); return; } closeSheets(); await Player.start(pendingStart, 'full'); go('playing'); } else { closeSheets(); Player.unlock(); await startPreviews(pendingStart); go('playing'); } });
   $('#btn-share').addEventListener('click', shareRecap);
   $('#btn-again').addEventListener('click', () => { const r = RECAP; if (!r) return; S.weights = { ...r.weights }; S.minutes = r.minutes; S.arc = r.arc; S.clean = r.clean; S.fam = r.fam; S.occasion = r.occasion; saveSettings(); if (planNight()) go('plan'); });
   $('#occasion-list').addEventListener('click', e => { const b = e.target.closest('[data-pick]'); if (!b) return; applyOccasion(b.dataset.pick); closeSheets(); renderBrief(); });
@@ -1239,6 +1405,6 @@ async function boot() {
   amInit().then(() => { if (NIGHT && AM.ready) resolveNight(NIGHT); else if (NIGHT && !hasApple() && !DEMO_ONLY) resolveNightLookup(NIGHT); });
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 }
-window.__selector = { parseRequest, parseBrief, intentKey };   // for the console and for tests
+window.__selector = { parseRequest, parseBrief, intentKey, analyzeBeats, Mix, Player, bpmOfLookup: id => { const k = NIGHT ? NIGHT.am.findIndex(m => m && m.id === id) : -1; return k < 0 ? 0 : T.bpm[NIGHT.plan.seq[k]]; } };   // for the console and for tests
 boot();
 })();
