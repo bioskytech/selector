@@ -30,6 +30,9 @@ final class AppState {
     var phaseFilter = "all"
     var steerReply: String?
     var steerChosen: String?
+    var parser: RequestParser?
+    /// Occasion name to use as the title when the sounds were customised in a typed brief.
+    @ObservationIgnored var briefTitle: String?
 
     var authorized = MusicAuthorization.currentStatus == .authorized
     var subscribed: Bool?
@@ -53,6 +56,8 @@ final class AppState {
             let cat = try await Task.detached(priority: .userInitiated) { try Catalog.load() }.value
             catalog = cat
             planner = SetPlanner(catalog: cat)
+            parser = RequestParser(catalog: cat)
+            if let tw = taste?.tw, tw.count != cat.count { taste = nil; Store.set("selector.taste", nil as Taste?) }
         } catch {
             say("Couldn't load the music data. \(error.localizedDescription)")
             return
@@ -90,7 +95,7 @@ final class AppState {
             if screen == "steer" {
                 try? await Task.sleep(nanoseconds: 600_000_000)
                 sheet = .steer
-                doSteer("up", nil)
+                doSteer([.energy(up: true)])
             }
         case "recap":
             n.startedAt = Date().addingTimeInterval(-7200)
@@ -106,7 +111,7 @@ final class AppState {
 
     func go(_ r: Route) {
         sheet = nil
-        if path.last != r { path.append(r) }
+        if let i = path.firstIndex(of: r) { path.removeSubrange((i + 1)...) } else { path.append(r) }
     }
     func back() { sheet = nil; if !path.isEmpty { path.removeLast() } }
     func home() { sheet = nil; path.removeAll() }
@@ -178,7 +183,10 @@ final class AppState {
 
     @discardableResult
     func planNight() -> Bool {
-        guard let plan = newPlan() else { say("Pick at least one sound"); return false }
+        if player.isActive { say("A night is already playing. End it first from the playing screen."); return false }
+        guard var plan = newPlan() else { say("Pick at least one sound"); return false }
+        if let briefTitle, settings.occasion == nil { plan.title = briefTitle }
+        briefTitle = nil
         player.stop()
         musicKitOK = true
         let n = Night(plan: plan)
@@ -246,11 +254,8 @@ final class AppState {
     }
 
     func checkSubscription() async {
-        if let sub = try? await MusicSubscription.current {
-            subscribed = sub.canPlayCatalogContent
-        } else {
-            subscribed = false
-        }
+        // Unknown stays unknown, so a hiccup doesn't lock the session into previews.
+        if let sub = try? await MusicSubscription.current { subscribed = sub.canPlayCatalogContent }
     }
 
     private enum ResolveOutcome { case done, stale, failed }
@@ -390,7 +395,7 @@ final class AppState {
         defer { starting = false }
 
         if MusicAuthorization.currentStatus == .notDetermined && !demo { _ = await ensureAuthorized(quiet: true) }
-        if authorized && subscribed == nil { await checkSubscription() }
+        if authorized && subscribed != true { await checkSubscription() }
         var wantFull: Bool { authorized && subscribed == true && musicKitOK }
         if wantFull {
             // Songs found through the lookup can't play in full: find them again on Apple Music.
@@ -465,6 +470,7 @@ final class AppState {
         guard subscribed == true else { showOffer = true; return }
         musicKitOK = true
         sheet = nil
+        guard player.isActive else { say("Apple Music connected. Nights will play as full songs."); return }
         let k = max(0, player.idx)
         player.stop()
         await startNight(from: k)
@@ -476,7 +482,13 @@ final class AppState {
     }
 
     private func trackStarted(_ k: Int) {
-        night?.played.insert(k)
+        guard let night, let planner else { return }
+        night.played.insert(k)
+        if night.firstPlay == nil { night.firstPlay = Date() }
+        // Keep the printed times honest after skips and jumps: this song started now.
+        let st = planner.startTimes(night.plan)
+        if k < st.count { night.startedAt = Date().addingTimeInterval(-st[k] - player.elapsed) }
+        if let u = night.undo, k > u.at + 1 { night.undo = nil }
     }
 
     var modeText: String {
@@ -487,21 +499,11 @@ final class AppState {
         }
     }
 
-    func toggleLove() {
-        guard let night, player.idx >= 0, player.idx < night.plan.seq.count else { return }
-        let j = night.plan.seq[player.idx]
-        if night.loved.contains(j) { night.loved.remove(j) } else { night.loved.insert(j) }
-    }
-
-    var lovedNow: Bool {
-        guard let night, player.idx >= 0, player.idx < night.plan.seq.count else { return false }
-        return night.loved.contains(night.plan.seq[player.idx])
-    }
-
     // MARK: Editing the plan
 
     func swapAt(_ k: Int) {
         guard let night, let planner, k < night.plan.seq.count else { return }
+        if player.isActive && k <= player.idx { say("That one already played"); return }
         var tried = night.swaps[k] ?? [night.plan.seq[k]]
         guard let alt = planner.alternative(night.plan, pos: k, exclude: tried) else { say("No other song fits this spot"); return }
         tried.insert(alt)
@@ -534,113 +536,172 @@ final class AppState {
     // MARK: Live steering
 
     /// Re-plans everything after the current song. Returns what the DJ says back.
-    func steer(_ action: String, _ arg: String? = nil) -> String {
-        guard let night, let planner else { return "" }
+    func steer(_ intents: [DJIntent]) -> String {
+        guard let night, let planner, !intents.isEmpty else { return "" }
         let plan = night.plan
+        let t = planner.cat.t
         let cur = player.isActive ? player.idx : -1
-        let keep = cur + 1
-        let prefix = Array(plan.seq.prefix(keep))
+        let keep = min(cur + 1, plan.seq.count)
+        var prefix = Array(plan.seq.prefix(keep))
         let st = planner.startTimes(plan)
-        let elapsed = keep < plan.seq.count ? st[keep] : planner.totalSeconds(plan)
-        night.undo = SteerUndo(seq: plan.seq, am: night.am, exclude: plan.exclude, boost: plan.boost,
-                               energyOff: plan.energyOff, fam: plan.fam, durS: plan.durS)
+        var elapsed = keep < plan.seq.count ? st[keep] : planner.totalSeconds(plan)
+        let undo = SteerUndo(seq: plan.seq, am: night.am, exclude: plan.exclude, boost: plan.boost, energyOff: plan.energyOff,
+                             fam: plan.fam, durS: plan.durS, weights: plan.weights, favor: plan.favor, banned: plan.banned,
+                             pv: plan.pv, pool: plan.pool, at: cur)
         var durS = plan.durS, fam = plan.fam
         var energyOff = plan.energyOff
-        var boost = plan.boost
-        var exclude = plan.exclude
-        var reply = ""
+        var boost = plan.boost ?? [:]
+        var exclude = plan.exclude ?? []
+        var weights = plan.weights
+        var favor = plan.favor
+        var banned = plan.banned
+        var forced: [Int] = []
+        var replies: [String] = []
+        var applied: [DJIntent] = []
         let curVibe: String? = cur >= 0 && cur < plan.seq.count ? planner.vibeKey(of: plan.seq[cur], in: plan) : nil
-        let tailStart = durS > 0 ? elapsed / durS : 0
-        var minutes = 20
+        let tailStart = durS > 0 ? min(elapsed / durS, 1) : 0
+        var liftedEnergy = false
 
-        switch action {
-        case "up":
-            energyOff = { p in p < tailStart + 0.18 ? 0.12 : 0.05 }
-            reply = "Got it. I'll lift the energy over the next two songs and keep it up from there."
-        case "down":
-            energyOff = { p in p < tailStart + 0.18 ? -0.12 : -0.05 }
-            reply = "Easing it down after this one. I'll hold it mellow for a stretch."
-        case "familiar":
-            fam = 0.95
-            reply = "Switching to the songs everyone knows for the rest of the night."
-        case "surprise":
-            fam = 0.35
-            reply = "Going deeper. Fewer hits, more finds."
-        case "more":
-            guard let v = arg else { night.undo = nil; return "" }
-            var b = boost ?? [:]
-            b[v, default: 0] += 0.35
-            boost = b
-            exclude?.remove(v)
-            reply = "More \(Vibes.name(v)) coming, starting after this one."
-        case "skip":
-            guard let v = arg ?? curVibe else { night.undo = nil; return "" }
-            var ex = exclude ?? []
-            ex.insert(v)
-            let left = plan.weights.keys.filter { !ex.contains($0) }.sorted()
-            if left.isEmpty { night.undo = nil; return "That's the only sound in the night, so I'll keep it." }
-            exclude = ex
-            reply = "No more \(Vibes.name(v)) for now. I'll lean on \(Vibes.joinNames(left.map { Vibes.name($0) }))."
-        case "wrap":
-            minutes = Int(arg ?? "") ?? 20
-            durS = elapsed + Double(minutes * 60)
-            let span = max(0.05, 1 - tailStart)
-            energyOff = { p in -0.25 * min(max((p - tailStart) / span, 0), 1) }
-            reply = "Wrapping up. \(minutes) more minutes, then I'll bring it home."
-        default:
-            night.undo = nil
-            return ""
+        for intent in intents {
+            switch intent {
+            case .energy(let up):
+                let d = up ? 1.0 : -1.0
+                energyOff = { p in d * (p < tailStart + 0.18 ? 0.12 : 0.05) }
+                liftedEnergy = up
+                replies.append(up ? "I'll lift the energy over the next two songs and keep it up." : "Easing it down after this one, and holding it mellow for a stretch.")
+            case .familiar:
+                fam = 0.95
+                replies.append("Switching to the songs everyone knows.")
+            case .surprise:
+                fam = 0.35
+                replies.append("Going deeper: fewer hits, more finds.")
+            case .more(let v):
+                if (weights[v] ?? 0) == 0 { weights[v] = 1 }
+                boost[v, default: 0] += 0.35
+                exclude.remove(v)
+                replies.append("More \(Vibes.name(v)) coming, starting after this one.")
+            case .less(let asked):
+                guard let v = asked ?? curVibe else { continue }
+                let left = weights.filter { $0.value > 0 && !exclude.contains($0.key) && $0.key != v }.keys.sorted()
+                if left.isEmpty { replies.append("\(Vibes.name(v)) is the only sound tonight, so I'll keep it."); continue }
+                if (weights[v] ?? 0) == 0 { replies.append("There's no \(Vibes.name(v)) in tonight's plan."); continue }
+                exclude.insert(v)
+                boost[v] = nil
+                replies.append("No more \(Vibes.name(v)) for now. I'll lean on \(Vibes.joinNames(left.map { Vibes.name($0) })).")
+            case .wrap(let minutes):
+                durS = elapsed + Double(minutes * 60)
+                let span = max(0.05, 1 - tailStart)
+                energyOff = { p in -0.25 * min(max((p - tailStart) / span, 0), 1) }
+                replies.append("\(minutes) more minutes, then I'll bring it home.")
+            case .playSong(let j):
+                guard j >= 0, j < planner.cat.count else { continue }
+                let title = Catalog.shortTitle(t.n[j])
+                if plan.clean && t.x[j] == 1 { replies.append("\(title) is explicit, and tonight is family-friendly."); continue }
+                if cur >= 0, cur < plan.seq.count, plan.seq[cur] == j { replies.append("\(title) is playing right now."); continue }
+                if prefix.contains(j) { replies.append("\(title) already played tonight. I'll find something close."); favor[j] = nil; continue }
+                forced.append(j)
+                favor[j] = 2.5
+                replies.append("\(title) by \(Catalog.firstArtist(t.ar[j])) is up next.")
+            case .moreArtist(let name):
+                let tracks = planner.tracks(byArtist: name).filter { !prefix.contains($0) && !(plan.clean && t.x[$0] == 1) }
+                if tracks.isEmpty { replies.append("I've played everything I have by \(name)."); continue }
+                for j in tracks { favor[j] = max(favor[j] ?? 0, 2.5) }
+                for j in tracks { banned.remove(t.a[j]) }
+                replies.append("More \(name) on the way.")
+            case .lessArtist(let name):
+                let key = Normalizer.artist(name)
+                for j in planner.tracks(byArtist: name) {
+                    favor[j] = -8
+                    if Normalizer.artist(Catalog.firstArtist(t.ar[j])) == key { banned.insert(t.a[j]) }
+                }
+                replies.append("No more \(name) tonight.")
+            }
+            applied.append(intent)
         }
+        guard !applied.isEmpty else { return replies.joined(separator: " ") }
 
+        for j in forced where !prefix.contains(j) {
+            prefix.append(j)
+            elapsed += Double(t.dur[j])
+        }
         settings.seed = (settings.seed &* 48271) % 2147483647
         if settings.seed == 0 { settings.seed = 11 }
         saveSettings()
-        let cfg = BuildConfig(weights: plan.weights, durS: durS, arc: plan.arc, clean: plan.clean, fam: fam, tw: plan.tw,
+        var cfg = BuildConfig(weights: weights, durS: max(durS, elapsed + 60), arc: plan.arc, clean: plan.clean, fam: fam, tw: plan.tw,
                               seed: settings.seed, xf: 0, prefix: prefix, elapsed: elapsed, energyOff: energyOff,
-                              boost: boost, exclude: exclude)
-        guard let r = planner.build(cfg), !r.seq.isEmpty else {
-            night.undo = nil
+                              boost: boost.isEmpty ? nil : boost, exclude: exclude.isEmpty ? nil : exclude)
+        cfg.favor = favor
+        cfg.banned = banned
+        guard let r = planner.build(cfg), !(r.seq.isEmpty && forced.isEmpty) else {
             return "I couldn't find enough songs for that. Try another request."
         }
+        night.undo = undo
         night.plan.seq = prefix + r.seq
+        // Keep the sound of songs that already played, even if that sound was just dropped.
+        var pv = r.pv
+        for j in plan.seq.prefix(keep) where pv[j] < 0 && plan.pv[j] >= 0 { pv[j] = plan.pv[j] }
+        night.plan.pv = pv
+        night.plan.pool = r.pool
+        night.plan.weights = weights
         night.plan.fam = fam
         night.plan.energyOff = energyOff
-        night.plan.boost = boost
-        night.plan.exclude = exclude
+        night.plan.boost = boost.isEmpty ? nil : boost
+        night.plan.exclude = exclude.isEmpty ? nil : exclude
+        night.plan.favor = favor
+        night.plan.banned = banned
         night.plan.durS = durS
-        night.am = Array(night.am.prefix(keep)) + Array(repeating: MatchState.pending, count: r.seq.count)
+        night.am = Array(night.am.prefix(keep)) + Array(repeating: MatchState.pending, count: night.plan.seq.count - keep)
         night.replaced = Set(night.replaced.filter { $0 < keep })
+        night.swaps = night.swaps.filter { $0.key < keep }
         night.generation += 1
         night.inFlight = []
         night.resolved = false
-        night.requests.append(SteerRequest(action: action, arg: arg, at: Date()))
-        if action == "up" {
-            let t = planner.cat.t
+        for i in applied { night.requests.append(SteerRequest(action: i.key, arg: nil, at: Date())) }
+        if !phaseKeys.contains(phaseFilter) { phaseFilter = "all" }
+        if liftedEnergy, applied.count == 1 {
             var hot = -1, he = -1.0
             for i in 0..<min(4, r.seq.count) where t.e[r.seq[i]] > he { he = t.e[r.seq[i]]; hot = i }
             if hot >= 0 {
-                reply = "Got it. I'll lift the energy over the next two songs and bring \(Catalog.shortTitle(t.n[r.seq[hot]])) forward to \(Fmt.clock(clock(at: keep + hot)))."
+                replies = ["I'll lift the energy over the next two songs and bring \(Catalog.shortTitle(t.n[r.seq[hot]])) forward to \(Fmt.clock(clock(at: prefix.count + hot)))."]
             }
         }
         Task {
             await syncPlayer()
             await resolveNight(night)
         }
-        return reply
+        return replies.joined(separator: " ")
+    }
+
+    private var phaseKeys: [String] {
+        guard let night, let planner else { return [] }
+        return planner.phases(night.plan).map { $0.key }
     }
 
     func undoSteer() {
         guard let night, let u = night.undo else { return }
-        night.plan.seq = u.seq
-        night.am = u.am
+        // Only what hasn't played yet goes back; the song that's on stays on.
+        let keep = min(max(player.isActive ? player.idx + 1 : 0, 0), min(u.seq.count, night.plan.seq.count))
+        let played = Array(night.plan.seq.prefix(keep))
+        let tail = u.seq.dropFirst(keep).filter { !played.contains($0) }
+        let tailAm = u.seq.indices.dropFirst(keep).filter { !played.contains(u.seq[$0]) }.map { u.am[$0] }
+        night.plan.seq = played + tail
+        night.am = Array(night.am.prefix(keep)) + tailAm
         night.plan.exclude = u.exclude
         night.plan.boost = u.boost
         night.plan.energyOff = u.energyOff
         night.plan.fam = u.fam
         night.plan.durS = u.durS
+        night.plan.weights = u.weights
+        night.plan.favor = u.favor
+        night.plan.banned = u.banned
+        var pv = u.pv
+        for j in played where pv[j] < 0 && night.plan.pv[j] >= 0 { pv[j] = night.plan.pv[j] }
+        night.plan.pv = pv
+        night.plan.pool = u.pool
         night.undo = nil
         night.generation += 1
         night.inFlight = []
+        night.replaced = Set(night.replaced.filter { $0 < keep })
         if !night.requests.isEmpty { night.requests.removeLast() }
         steerReply = nil
         steerChosen = nil
@@ -652,61 +713,112 @@ final class AppState {
     }
 
     /// Chips on the playing screen and in the steer sheet.
-    func steerChips(short: Bool) -> [(action: String, label: String, arg: String?)] {
+    func steerChips(short: Bool) -> [(intent: DJIntent, label: String)] {
         let heads = night?.plan.heads ?? []
-        var chips: [(action: String, label: String, arg: String?)] = [
-            ("up", "More energy", nil), ("down", "Bring it down", nil), ("familiar", "Something we know", nil),
+        var chips: [(intent: DJIntent, label: String)] = [
+            (.energy(up: true), "More energy"), (.energy(up: false), "Bring it down"), (.familiar, "Something we know"),
         ]
-        if !short { chips.append(("surprise", "Surprise us", nil)) }
-        for h in (short ? Array(heads.prefix(1)) : heads) { chips.append(("more", "More \(Vibes.name(h))", h)) }
-        chips.append(("skip", "Skip this vibe", nil))
-        chips.append(("wrap", "Wrap up in 20 min", "20"))
+        if !short { chips.append((.surprise, "Surprise us")) }
+        for h in (short ? Array(heads.prefix(1)) : heads) { chips.append((.more(vibe: h), "More \(Vibes.name(h))")) }
+        chips.append((.less(vibe: nil), "Skip this vibe"))
+        chips.append((.wrap(minutes: 20), "Wrap up in 20 min"))
         return chips
     }
 
-    func doSteer(_ action: String, _ arg: String?) {
-        let reply = steer(action, arg)
-        steerChosen = action + "|" + (arg ?? "")
+    func doSteer(_ intents: [DJIntent]) {
+        let reply = steer(intents)
+        steerChosen = intents.first?.key
         steerReply = reply.isEmpty ? "I couldn't do that one." : reply
     }
 
     func steerFromText(_ text: String) {
-        guard let (action, arg) = parseRequest(text) else {
-            steerReply = "I didn't catch that. Try 'more energy', 'slow it down', 'more Punjabi', or 'wrap up in 15 minutes'."
-            return
+        let intents = parser?.parse(text) ?? []
+        if !intents.isEmpty { doSteer(intents); return }
+        steerReply = "Thinking…"
+        let sounds = Vibes.order
+        Task {
+            if let intent = await OnDeviceDJ.interpret(text, sounds: sounds) {
+                doSteer([intent])
+            } else {
+                steerChosen = nil
+                steerReply = "I didn't catch that. Try \"more energy\", \"play Brown Munde\", \"no more techno\", or \"wrap up in 15 minutes\"."
+            }
         }
-        doSteer(action, arg)
     }
 
-    func parseRequest(_ text: String) -> (String, String?)? {
-        let cleaned = String(text.lowercased().unicodeScalars.map { u -> Character in
-            (u.isASCII && CharacterSet.alphanumerics.contains(u)) || u == "&" || u == " " ? Character(u) : " "
-        })
-        let t = " " + cleaned + " "
-        func has(_ pattern: String) -> Bool { t.range(of: pattern, options: .regularExpression) != nil }
-        if has("(wrap|wind down|last song|end it|end the night|finish|close out)") {
-            if let r = t.range(of: #"(\d+)\s*(min|minute)"#, options: .regularExpression) {
-                let digits = t[r].prefix { $0.isNumber }
-                return ("wrap", String(digits))
-            }
-            return ("wrap", "20")
+    // MARK: Reading the room
+
+    /// Loving a song nudges the rest of the night toward that artist.
+    func toggleLove() {
+        guard let night, let planner, player.idx >= 0, player.idx < night.plan.seq.count else { return }
+        let j = night.plan.seq[player.idx]
+        let artist = Catalog.firstArtist(planner.cat.t.ar[j])
+        if night.loved.contains(j) {
+            night.loved.remove(j)
+            for k in planner.tracks(byArtist: artist) where night.plan.favor[k] == 0.9 { night.plan.favor[k] = nil }
+        } else {
+            night.loved.insert(j)
+            for k in planner.tracks(byArtist: artist) where night.plan.favor[k] == nil { night.plan.favor[k] = 0.9 }
+            Haptics.tap()
         }
-        for k in Vibes.order {
-            let v = Vibes.style(k)
-            let tokens = [v.name, v.short ?? "", k].joined(separator: " & ").lowercased()
-                .components(separatedBy: CharacterSet(charactersIn: "&, "))
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { $0.count >= 3 && !["and", "the"].contains($0) }
-            if tokens.contains(where: { t.contains(" " + $0) }) {
-                if has("(no more|skip|less|enough|drop|stop|without)") { return ("skip", k) }
-                return ("more", k)
+    }
+
+    var lovedNow: Bool {
+        guard let night, player.idx >= 0, player.idx < night.plan.seq.count else { return false }
+        return night.loved.contains(night.plan.seq[player.idx])
+    }
+
+    /// Skip to the next song. Two quick skips of the same sound and the DJ eases off it.
+    func skip() async {
+        guard let night, let planner, player.idx >= 0, player.idx < night.plan.seq.count else { await player.next(); return }
+        let k = player.idx
+        let j = night.plan.seq[k]
+        let early = player.elapsed < min(45, max(8, player.dur * 0.35))
+        await player.next()
+        guard early, player.mode == .full || player.dur > 60 else { return }
+        night.plan.favor[j] = -4
+        night.skips.append(k)
+        let v = planner.vibeKey(of: j, in: night.plan)
+        let recent = night.skips.suffix(2)
+        if recent.count == 2, let a = recent.first, k - a <= 3, a < night.plan.seq.count,
+           planner.vibeKey(of: night.plan.seq[a], in: night.plan) == v,
+           night.plan.weights.filter({ $0.value > 0 && !(night.plan.exclude?.contains($0.key) ?? false) }).count > 1 {
+            night.skips.removeAll()
+            let reply = steer([.less(vibe: v)])
+            if !reply.isEmpty { say("Two quick skips. " + reply) }
+        }
+    }
+
+    // MARK: Describing the night
+
+    /// "Sangeet, mostly Punjabi, three hours": plan straight from a sentence.
+    func planFromText(_ text: String) {
+        guard let parser, let planner else { return }
+        let r = parser.parseBrief(text)
+        guard r.understoodAnything else {
+            say("Tell me the occasion, the sounds, or how long. For example: house party, hip-hop and afrobeats, two hours.")
+            return
+        }
+        if player.isActive { say("A night is playing. End it first, or tell your DJ what to change."); return }
+        if let o = Occasion.named(r.occasion) {
+            if r.weights.isEmpty { settings.apply(o) } else {
+                settings.arc = o.arc; settings.clean = o.clean; settings.fam = o.fam; settings.minutes = o.minutes
             }
         }
-        if has("(slow|chill|mellow|bring it down|calm|softer|lower|down)") { return ("down", nil) }
-        if has("(energy|hype|turn up|louder|faster|harder|up|bang|lift|dance)") { return ("up", nil) }
-        if has("(know|familiar|hits|classic|sing along|popular)") { return ("familiar", nil) }
-        if has("(surprise|deep cut|new|discover|underground)") { return ("surprise", nil) }
-        return nil
+        if !r.weights.isEmpty { settings.weights = r.weights }
+        settings.occasion = r.weights.isEmpty ? r.occasion : Occasion.matching(settings.weights)?.key
+        briefTitle = r.weights.isEmpty ? nil : Occasion.named(r.occasion)?.label
+        if let m = r.minutes { settings.minutes = m }
+        if let c = r.clean { settings.clean = c }
+        if let f = r.fam { settings.fam = f }
+        if let a = r.arc { settings.arc = a }
+        if !r.artists.isEmpty, let t = planner.taste(from: r.artists, source: "You asked for \(Vibes.joinNames(r.artists))") {
+            taste = t
+            Store.set("selector.taste", t)
+            settings.useTaste = true
+        }
+        saveSettings()
+        if planNight() { path = [.plan] }
     }
 
     // MARK: The end of the night
@@ -719,7 +831,11 @@ final class AppState {
         Store.set("selector.nights", nights)
         Store.set("selector.night", nil as SavedNight?)
         recap = rec
+        sheet = nil
+        steerReply = nil
+        steerChosen = nil
         player.stop()
+        self.night = nil
         path = [.recap]
     }
 
@@ -732,7 +848,7 @@ final class AppState {
         for k in pool { if let e = t?.e[plan.seq[k]], e > pe { pe = e; peakK = k } }
         let base = n.startOrNow
         let st = planner?.startTimes(plan) ?? []
-        let seconds = played.isEmpty ? (planner?.totalSeconds(plan) ?? 0) : played.reduce(0.0) { $0 + Double(t?.dur[plan.seq[$1]] ?? 0) }
+        let seconds = n.firstPlay.map { Date().timeIntervalSince($0) } ?? (planner?.totalSeconds(plan) ?? 0)
         func art(_ k: Int) -> String? { n.track(at: k)?.artworkURL(600)?.absoluteString }
         return Recap(id: n.createdAt.timeIntervalSince1970, title: plan.title, date: Fmt.weekday(base), seconds: seconds,
                      songs: pool.count, peakK: peakK, peakJ: plan.seq.isEmpty ? 0 : plan.seq[min(peakK, plan.seq.count - 1)],
@@ -757,6 +873,11 @@ final class AppState {
         settings.occasion = r.occasion
         saveSettings()
         if planNight() { path = [.plan] }
+    }
+
+    /// End the night early, from the playing screen.
+    func endNight() {
+        finishNight()
     }
 
     func savePlaylist() async {
@@ -846,11 +967,14 @@ final class AppState {
 
     private func restoreNight() {
         guard let planner, let s = Store.get("selector.night", as: SavedNight.self),
-              Date().timeIntervalSince(s.createdAt) < 12 * 3600, !s.seq.isEmpty else { return }
+              Date().timeIntervalSince(s.createdAt) < 12 * 3600, !s.seq.isEmpty,
+              s.seq.allSatisfy({ $0 >= 0 && $0 < planner.cat.count }) else { return }
         let tw = tasteWeights
         let cfg = BuildConfig(weights: s.weights, durS: 60, arc: s.arc, clean: s.clean, fam: s.fam, tw: tw, seed: 1)
         guard let r = planner.build(cfg) else { return }
-        let plan = Plan(seq: s.seq, pv: r.pv, pool: r.pool, short: false, baseE: r.baseE, amp: r.amp, weights: s.weights,
+        var pv = r.pv
+        for j in s.seq where pv[j] < 0 { pv[j] = planner.vibeIndex[Settings(weights: s.weights).sounds.first ?? "pop"] ?? 0 }
+        let plan = Plan(seq: s.seq, pv: pv, pool: r.pool, short: false, baseE: r.baseE, amp: r.amp, weights: s.weights,
                         arc: s.arc, clean: s.clean, fam: s.fam, tw: tw, durS: s.durS, title: s.title)
         let n = Night(plan: plan, createdAt: s.createdAt)
         n.startedAt = s.startedAt

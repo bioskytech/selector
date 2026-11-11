@@ -41,6 +41,10 @@ struct BuildConfig {
     var energyOff: ((Double) -> Double)? = nil
     var boost: [String: Double]? = nil
     var exclude: Set<String>? = nil
+    /// Per-track nudges from requests and from what was loved or skipped tonight.
+    var favor: [Int: Double] = [:]
+    /// Primary-artist indices not to play again tonight.
+    var banned: Set<Int> = []
 }
 
 struct Plan {
@@ -60,6 +64,8 @@ struct Plan {
     var exclude: Set<String>? = nil
     var boost: [String: Double]? = nil
     var energyOff: ((Double) -> Double)? = nil
+    var favor: [Int: Double] = [:]
+    var banned: Set<Int> = []
 
     /// Sounds the plan was asked for, strongest first.
     var heads: [String] { weights.filter { $0.value >= 3 }.keys.sorted() }
@@ -124,6 +130,10 @@ final class SetPlanner {
     let clubTempo: ArcShape
     private let byArtist: [String: [Int]]
     private let artistIndex: [String: Int]
+    private let tCoef: [Double]
+    private let eCoef: [Double]
+    private let camCoef: [Double]
+    private let camIndex: [UInt8]      // key relation for every pair of the 24 keys
 
     init(catalog: Catalog) {
         cat = catalog
@@ -162,7 +172,34 @@ final class SetPlanner {
         var ai: [String: Int] = [:]
         for (i, a) in catalog.artists.enumerated() { ai[Normalizer.artist(a)] = i }
         artistIndex = ai
+
+        // The transition model, unpacked into arrays so scoring a pair of songs is a few lookups.
+        let m = catalog.model
+        tCoef = (0..<max(1, m.tbins.count - 1)).map { m.coef["t\($0)"] ?? 0 }
+        eCoef = (0..<max(1, m.ebins.count - 1)).map { m.coef["e\($0)"] ?? 0 }
+        var relNames: [String] = []
+        var relCoef: [Double] = []
+        var table = [UInt8](repeating: 0, count: 24 * 24)
+        for a in 0..<24 {
+            for b in 0..<24 {
+                let rel = KeyRelation.between(Camelot(key: a % 12, mode: a >= 12 ? 1 : 0), Camelot(key: b % 12, mode: b >= 12 ? 1 : 0)).rawValue
+                var idx = relNames.firstIndex(of: rel)
+                if idx == nil { relNames.append(rel); relCoef.append(m.coef["cam_" + rel] ?? 0); idx = relNames.count - 1 }
+                table[a * 24 + b] = UInt8(idx ?? 0)
+            }
+        }
+        camCoef = relCoef
+        camIndex = table
+        cUp = m.coef["up_energy"] ?? 0
+        cDance = m.coef["ad_dance"] ?? 0
+        cVal = m.coef["ad_val"] ?? 0
+        cLoud = m.coef["ad_loud"] ?? 0
+        cInstr = m.coef["ad_instr"] ?? 0
     }
+    private let cUp: Double, cDance: Double, cVal: Double, cLoud: Double, cInstr: Double
+
+    /// Catalog tracks credited to an artist, by any spelling.
+    func tracks(byArtist name: String) -> [Int] { byArtist[Normalizer.artist(name)] ?? [] }
 
     private static func smooth(_ a: [Double]) -> [Double] {
         guard a.count >= 3 else { return a }
@@ -206,18 +243,17 @@ final class SetPlanner {
     /// Log-odds that a real DJ would play `j` after `i`.
     func logit(_ i: Int, _ j: Int) -> Double {
         let m = cat.model
-        let c = m.coef
         let t = cat.t
         var z = m.intercept
-        z += c["t\(bin(m.tbins, tempoGapPercent(t.bpm[i], t.bpm[j])))"] ?? 0
-        z += c["cam_" + KeyRelation.between(camelot[i], camelot[j]).rawValue] ?? 0
+        z += tCoef[min(bin(m.tbins, tempoGapPercent(t.bpm[i], t.bpm[j])), tCoef.count - 1)]
+        z += camCoef[Int(camIndex[(t.k[i] % 24) * 24 + (t.k[j] % 24)])]
         let de = t.e[j] - t.e[i]
-        z += c["e\(bin(m.ebins, abs(de)))"] ?? 0
-        z += (c["up_energy"] ?? 0) * max(0, de)
-        z += (c["ad_dance"] ?? 0) * abs(t.d[j] - t.d[i])
-        z += (c["ad_val"] ?? 0) * abs(t.v[j] - t.v[i])
-        z += (c["ad_loud"] ?? 0) * abs(t.l[j] - t.l[i]) / 20
-        z += (c["ad_instr"] ?? 0) * abs(t.i[j] - t.i[i])
+        z += eCoef[min(bin(m.ebins, abs(de)), eCoef.count - 1)]
+        z += cUp * max(0, de)
+        z += cDance * abs(t.d[j] - t.d[i])
+        z += cVal * abs(t.v[j] - t.v[i])
+        z += cLoud * abs(t.l[j] - t.l[i]) / 20
+        z += cInstr * abs(t.i[j] - t.i[i])
         return z
     }
 
@@ -296,7 +332,16 @@ final class SetPlanner {
             pv[i] = best
             pool.append(i)
         }
+        // Songs asked for by name or artist come along even when their sound wasn't picked.
+        for (i, f) in cfg.favor where f >= 2 && i >= 0 && i < n && pv[i] < 0 {
+            if cfg.clean && t.x[i] == 1 { continue }
+            pv[i] = homeVibe(i, share: share)
+            pool.append(i)
+        }
+        for j in cfg.prefix where j >= 0 && j < n && pv[j] < 0 { pv[j] = homeVibe(j, share: share) }
         guard !pool.isEmpty else { return nil }
+        let favor = cfg.favor
+        let banned = cfg.banned
 
         var baseE = 0.0
         for s in sel { if let v = vibeIndex[s.key] { baseE += energyMed(v) * Double(s.w) / sumW } }
@@ -333,6 +378,7 @@ final class SetPlanner {
             if prev >= 0 && pv[prev] == v && b.block < 4 { s += 0.35 }
             s += 0.4 * sh.value(at: p) * (energyMed(v) - baseE) / 0.15
             if let tw { s += 0.6 * Double(tw[j]) }
+            if let f = favor[j] { s += f }
             s += (fam - 0.5) * 2.2 * (Double(t.p[j]) / 100) + 0.25 * t.d[j]
             return s + rng.unit() * 0.3
         }
@@ -340,6 +386,7 @@ final class SetPlanner {
         func ok(_ b: Beam, _ j: Int) -> Bool {
             if b.used.contains(j) || b.titles.contains(titleKey[j]) { return false }
             let a = t.a[j]
+            if banned.contains(a) { return false }
             let cnt = b.seq.count
             if let last = b.artistLast[a], last > cnt - 6 { return false }
             return (b.artistCount[a] ?? 0) < maxArtist
@@ -354,8 +401,7 @@ final class SetPlanner {
             root.titles.insert(titleKey[j])
             root.artistLast[t.a[j]] = cnt
             root.artistCount[t.a[j], default: 0] += 1
-            let v = pv[j] >= 0 ? pv[j] : 0
-            root.vibeCount[v] += 1
+            root.vibeCount[pv[j]] += 1
             root.time += playSec(j)
         }
         if let elapsed = cfg.elapsed { root.time = elapsed }
@@ -419,6 +465,13 @@ final class SetPlanner {
         func perSong(_ b: Beam) -> Double { b.score / Double(max(1, b.seq.count - prefixLen)) }
         guard let best = beams.max(by: { perSong($0) < perSong($1) }) else { return nil }
         return BuildResult(seq: Array(best.seq.dropFirst(prefixLen)), pv: pv, pool: pool, short: best.short, baseE: baseE, amp: amp)
+    }
+
+    /// The sound a track belongs to when it wasn't picked for one: the most-wanted sound it carries.
+    private func homeVibe(_ i: Int, share: [Double]) -> Int {
+        var best = 0, bs = -1.0
+        for v in cat.vibes.indices where cat.t.vm[i] & (1 << v) != 0 && share[v] > bs { bs = share[v]; best = v }
+        return best
     }
 
     // MARK: Times, phases
@@ -583,7 +636,7 @@ final class SetPlanner {
         var best = -1
         var bs = -Double.infinity
         for j in plan.pool {
-            if used.contains(j) || exclude.contains(j) || titles.contains(titleKey[j]) || near.contains(t.a[j]) { continue }
+            if used.contains(j) || exclude.contains(j) || titles.contains(titleKey[j]) || near.contains(t.a[j]) || plan.banned.contains(t.a[j]) { continue }
             let v = plan.pv[j]
             var s = 0.0
             if prev >= 0 { s += logit(prev, j) }
@@ -591,6 +644,7 @@ final class SetPlanner {
             let target = min(max(energyMed(v) + plan.amp * sh.value(at: p), 0.22), 0.97)
             s -= 4 * abs(t.e[j] - target)
             if let tw = plan.tw { s += 0.6 * Double(tw[j]) }
+            if let f = plan.favor[j] { s += f }
             s += (plan.fam - 0.5) * 2.2 * (Double(t.p[j]) / 100)
             if s > bs { bs = s; best = j }
         }

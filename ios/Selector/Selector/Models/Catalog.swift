@@ -92,7 +92,7 @@ enum CatalogError: LocalizedError {
 
 // MARK: - Vibes
 
-/// Display name and colour for each of the 16 sounds. Same palette as the web app.
+/// Display name and colour for each of the 16 sounds. Every colour is bright enough to carry dark type.
 struct VibeStyle {
     let name: String
     let short: String?
@@ -104,22 +104,22 @@ struct VibeStyle {
 
 enum Vibes {
     static let all: [String: VibeStyle] = [
-        "bollywood": VibeStyle(name: "Bollywood", short: nil, hex: "#D83A8E", dark: false),
-        "punjabi": VibeStyle(name: "Punjabi", short: nil, hex: "#E4572E", dark: false),
-        "southindian": VibeStyle(name: "Telugu & Tamil", short: nil, hex: "#1E9E8A", dark: false),
-        "mideast": VibeStyle(name: "Arabic, Persian & Turkish", short: "Middle East", hex: "#C98500", dark: false),
-        "reggaeton": VibeStyle(name: "Reggaeton", short: nil, hex: "#E0B000", dark: true),
-        "latin": VibeStyle(name: "Latin", short: nil, hex: "#F28C38", dark: false),
-        "afro": VibeStyle(name: "Afrobeats", short: nil, hex: "#8A5CF5", dark: false),
-        "kpop": VibeStyle(name: "K-Pop & J-Pop", short: nil, hex: "#FF5FA2", dark: false),
-        "techno": VibeStyle(name: "Techno", short: nil, hex: "#3B6CF0", dark: false),
-        "house": VibeStyle(name: "House", short: nil, hex: "#5C8DFF", dark: false),
-        "trance": VibeStyle(name: "Trance", short: nil, hex: "#7B61FF", dark: false),
-        "edm": VibeStyle(name: "EDM", short: nil, hex: "#2E55C5", dark: false),
-        "bass": VibeStyle(name: "Drum & Bass", short: nil, hex: "#1F3FA8", dark: false),
-        "disco": VibeStyle(name: "Disco & Funk", short: nil, hex: "#B02A7A", dark: false),
-        "hiphop": VibeStyle(name: "Hip-Hop & R&B", short: nil, hex: "#6E3FD6", dark: false),
-        "pop": VibeStyle(name: "Pop", short: nil, hex: "#15806F", dark: false),
+        "bollywood": VibeStyle(name: "Bollywood", short: nil, hex: "#FF4FA0", dark: true),
+        "punjabi": VibeStyle(name: "Punjabi", short: nil, hex: "#FF8A1F", dark: true),
+        "southindian": VibeStyle(name: "Telugu & Tamil", short: nil, hex: "#19C3A6", dark: true),
+        "mideast": VibeStyle(name: "Arabic, Persian & Turkish", short: "Middle East", hex: "#E9B44C", dark: true),
+        "reggaeton": VibeStyle(name: "Reggaeton", short: nil, hex: "#FFD60A", dark: true),
+        "latin": VibeStyle(name: "Latin", short: nil, hex: "#FF5E3A", dark: true),
+        "afro": VibeStyle(name: "Afrobeats", short: nil, hex: "#5BD66B", dark: true),
+        "kpop": VibeStyle(name: "K-Pop & J-Pop", short: nil, hex: "#6FD3FF", dark: true),
+        "techno": VibeStyle(name: "Techno", short: nil, hex: "#4D7DFF", dark: true),
+        "house": VibeStyle(name: "House", short: nil, hex: "#2ED3E6", dark: true),
+        "trance": VibeStyle(name: "Trance", short: nil, hex: "#9B8CFF", dark: true),
+        "edm": VibeStyle(name: "EDM", short: nil, hex: "#B8F03C", dark: true),
+        "bass": VibeStyle(name: "Drum & Bass", short: nil, hex: "#FF3B4E", dark: true),
+        "disco": VibeStyle(name: "Disco & Funk", short: nil, hex: "#F25BD6", dark: true),
+        "hiphop": VibeStyle(name: "Hip-Hop & R&B", short: nil, hex: "#C9A4FF", dark: true),
+        "pop": VibeStyle(name: "Pop", short: nil, hex: "#FF7A90", dark: true),
     ]
     static let order = ["bollywood", "punjabi", "southindian", "mideast", "reggaeton", "latin", "afro", "kpop",
                         "techno", "house", "trance", "edm", "bass", "disco", "hiphop", "pop"]

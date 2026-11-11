@@ -25,6 +25,11 @@ jobs:
             echo "BUILD SUCCEEDED"; exit 0
           fi
           echo "---- errors ----"; (grep -E "error" build.log | sed 's/.*Selector\/Selector\///' | sort -u | head -80) || true; echo "---- tail ----"; tail -25 build.log; exit 1
+      - name: What the DJ understands and plans
+        run: |
+          cd ios/Selector
+          swiftc -O -o /tmp/djcheck Selector/Models/Catalog.swift Selector/Models/MusicTheory.swift Selector/Models/Planner.swift Selector/Models/Requests.swift Tests/main.swift 2>&1 | grep -E "error" | head -30 || true
+          /tmp/djcheck Selector/Resources/app_data.json || true
       - name: Screenshots
         if: success()
         run: |
@@ -39,7 +44,7 @@ jobs:
           for s in tonight brief plan songs playing steer recap; do
             xcrun simctl terminate "$DEV" com.yourname.selector 2>/dev/null
             xcrun simctl launch "$DEV" com.yourname.selector -demo $s
-            case $s in tonight|brief) sleep 7;; *) sleep 32;; esac
+            case $s in tonight|brief) sleep 7;; plan) sleep 34;; *) sleep 12;; esac
             xcrun simctl io "$DEV" screenshot "shots/$s.png"
           done
           sips -Z 1300 shots/*.png >/dev/null

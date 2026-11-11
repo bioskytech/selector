@@ -31,6 +31,7 @@ final class Player {
     @ObservationIgnored private var deckB = AVPlayer()
     @ObservationIgnored private var endObserver: NSObjectProtocol?
     @ObservationIgnored private var wasPlaying = false
+    @ObservationIgnored private var busy = false
     @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
     @ObservationIgnored private var resumeAfterInterruption = false
 
@@ -56,22 +57,30 @@ final class Player {
         songs = list
         mode = newMode
         idx = k
-        switch newMode {
-        case .full:
-            let ids = list[k...].compactMap { $0?.song }
-            guard let first = ids.first else { throw PlayerError.nothingToPlay }
-            music.queue = ApplicationMusicPlayer.Queue(for: ids, startingAt: first)
-            applyTransition()
-            try await music.play()
-            wasPlaying = true
-        case .preview:
-            try configureAudioSession()
-            playPreview(k)
-        case .none:
-            return
+        busy = true
+        defer { busy = false }
+        do {
+            switch newMode {
+            case .full:
+                let ids = list[k...].compactMap { $0?.song }
+                guard let first = ids.first else { throw PlayerError.nothingToPlay }
+                music.queue = ApplicationMusicPlayer.Queue(for: ids, startingAt: first)
+                applyTransition()
+                try await music.play()
+            case .preview:
+                guard list[k...].contains(where: { $0?.previewURL != nil }) else { throw PlayerError.nothingToPlay }
+                try configureAudioSession()
+                playPreview(k)
+            case .none:
+                return
+            }
+        } catch {
+            // Never leave a half-started player behind: the app would think a night is playing.
+            stop()
+            throw error
         }
         startTimer()
-        onTrack?(k)
+        onTrack?(idx)
     }
 
     func stop() {
@@ -114,6 +123,8 @@ final class Player {
             guard let first = ids.first else { return }
             let t = music.playbackTime
             let keepPlaying = playing
+            busy = true
+            defer { busy = false }
             do {
                 music.queue = ApplicationMusicPlayer.Queue(for: ids, startingAt: first)
                 applyTransition()
@@ -135,6 +146,8 @@ final class Player {
         case .full:
             if music.state.playbackStatus == .playing { music.pause() } else { try? await music.play() }
         case .preview:
+            // Mid-blend, land on the incoming song first so pause really pauses.
+            if fading { finishBlend(to: idx + 1) }
             if deckA.rate > 0 { deckA.pause() } else { deckA.play() }
         case .none:
             return
@@ -157,10 +170,14 @@ final class Player {
     }
 
     func previous() async {
+        if fading { finishBlend(to: idx + 1) }
         if elapsed > 5 { seek(0); return }
         switch mode {
         case .full:
-            try? await music.skipToPreviousEntry()
+            // The queue only holds what's ahead, so going back means starting from the earlier song.
+            guard let k = songs.indices.last(where: { $0 < idx && songs[$0]?.song != nil }) else { seek(0); return }
+            await jump(to: k)
+            return
         case .preview:
             guard idx > 0 else { seek(0); return }
             fadeTimer?.invalidate(); fading = false
@@ -203,9 +220,12 @@ final class Player {
 
     private func startTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
+        // Common mode: keep ticking while the listener scrolls.
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
     }
 
     private func tick() {
@@ -232,8 +252,9 @@ final class Player {
             }
         }
         if playing { wasPlaying = true }
-        if status == .stopped && wasPlaying && idx >= songs.count - 1 {
-            // The queue ran out: the night is over.
+        // The queue ran out on the last playable song: the night is over.
+        let last = songs.indices.last { songs[$0]?.song != nil } ?? (songs.count - 1)
+        if !busy && wasPlaying && idx >= last && (status == .stopped || (status == .paused && dur > 0 && elapsed >= dur - 1.5)) {
             finish()
         }
     }
@@ -324,7 +345,7 @@ final class Player {
         let t0 = Date()
         let length = max(1, min(blend(after: idx), 8))
         fadeTimer?.invalidate()
-        fadeTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+        let ft = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.fading else { return }
                 let p = min(1, Date().timeIntervalSince(t0) / length)
@@ -334,9 +355,12 @@ final class Player {
                 if p >= 1 { self.finishBlend(to: k) }
             }
         }
+        RunLoop.main.add(ft, forMode: .common)
+        fadeTimer = ft
     }
 
     private func finishBlend(to k: Int) {
+        guard fading else { return }
         fadeTimer?.invalidate(); fadeTimer = nil
         deckA.pause()
         let out = deckA

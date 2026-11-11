@@ -1,21 +1,52 @@
 import SwiftUI
+import CoreText
+import UIKit
 
-/// Design tokens. Dark ground, coral accent, artwork-forward.
+/// The look: a plum night, ivory type, and one loud colour that belongs to tonight's lead sound.
+/// Titles are set like gig posters (Anton, capitals); everything you read at length is the system face.
 enum Theme {
-    static let bg = Color(hex: "#0A0A0D")
-    static let surface = Color(hex: "#15151A")
-    static let surface2 = Color(hex: "#1D1D24")
-    static let surface3 = Color(hex: "#23232B")
-    static let ink = Color.white
-    static let ink2 = Color(hex: "#A3A3AD")
-    static let ink3 = Color(hex: "#6E6E78")
-    static let accent = Color(hex: "#FF6A3D")
-    static let accentInk = Color(hex: "#14080A")
-    static let good = Color(hex: "#3DDC84")
-    static let hair = Color.white.opacity(0.06)
-    static let hair2 = Color.white.opacity(0.14)
+    static let bg = Color(hex: "#140B1F")
+    static let surface = Color(hex: "#20132E")
+    static let surface2 = Color(hex: "#2B1A3C")
+    static let surface3 = Color(hex: "#3A2550")
+    static let ink = Color(hex: "#FFF3E4")
+    static let ink2 = Color(hex: "#BBAACB")
+    static let ink3 = Color(hex: "#806F92")
+    static let marigold = "#FFB300"
+    /// Type that sits on a colour field.
+    static let onColor = Color(hex: "#1A0B16")
+    static let good = Color(hex: "#5BD66B")
+    static let hair = Color.white.opacity(0.07)
+    static let hair2 = Color.white.opacity(0.16)
 
     static func vibe(_ key: String) -> Color { Color(hex: Vibes.hex(key)) }
+
+    /// Makes the bundled display face available. Safe to call more than once.
+    static func registerFonts() {
+        guard let url = Bundle.main.url(forResource: "Anton-Regular", withExtension: "ttf") else { return }
+        CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+    }
+}
+
+enum Haptics {
+    static func tap() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+    static func thud() { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+}
+
+extension AppState {
+    /// The sound that leads tonight: its colour is the app's accent.
+    var leadVibe: String {
+        if let night { return night.plan.soundsByWeight.first ?? "punjabi" }
+        return settings.sounds.first ?? "punjabi"
+    }
+    var accentHex: String { Vibes.all[leadVibe]?.hex ?? Theme.marigold }
+    var accent: Color { Color(hex: accentHex) }
+    /// A second colour for gradients: the next sound of the night, or a warmer shade of the first.
+    var accent2: Color {
+        let sounds = night?.plan.soundsByWeight ?? settings.sounds
+        if sounds.count > 1 { return Color(hex: Vibes.hex(sounds[1])) }
+        return Color.shade(accentHex, -22)
+    }
 }
 
 extension Color {
@@ -38,105 +69,124 @@ extension Color {
         func c(_ v: UInt64) -> Double { min(max(Double(v) * f, 0), 255) / 255 }
         return Color(red: c((n >> 16) & 0xFF), green: c((n >> 8) & 0xFF), blue: c(n & 0xFF))
     }
-
-    /// The playing screen's tint: the artwork colour pulled down into the dark.
-    static func tint(from cg: CGColor?) -> Color {
-        guard let cg, let comps = cg.converted(to: CGColorSpaceCreateDeviceRGB(), intent: .defaultIntent, options: nil)?.components, comps.count >= 3 else {
-            return Color(red: 26 / 255, green: 15 / 255, blue: 18 / 255)
-        }
-        let f = 0.28
-        return Color(red: Double(comps[0]) * f + 10 / 255, green: Double(comps[1]) * f + 10 / 255, blue: Double(comps[2]) * f + 13 / 255)
-    }
-
-    static func tint(fromHex hex: String) -> Color {
-        var h = hex
-        if h.hasPrefix("#") { h.removeFirst() }
-        var n: UInt64 = 0
-        Scanner(string: h).scanHexInt64(&n)
-        let f = 0.28
-        return Color(red: Double((n >> 16) & 0xFF) / 255 * f + 10 / 255, green: Double((n >> 8) & 0xFF) / 255 * f + 10 / 255, blue: Double(n & 0xFF) / 255 * f + 13 / 255)
-    }
 }
 
 extension Font {
-    static func display(_ size: CGFloat) -> Font { .system(size: size, weight: .heavy) }
+    /// Poster type. Use with capitals.
+    static func poster(_ size: CGFloat) -> Font { .custom("Anton-Regular", fixedSize: size) }
+    static func display(_ size: CGFloat) -> Font { .system(size: size, weight: .bold) }
     static func heading(_ size: CGFloat) -> Font { .system(size: size, weight: .bold) }
-    static func text(_ size: CGFloat, _ weight: Font.Weight = .semibold) -> Font { .system(size: size, weight: weight) }
-    static func small(_ size: CGFloat = 12) -> Font { .system(size: size, weight: .bold) }
+    static func text(_ size: CGFloat, _ weight: Font.Weight = .medium) -> Font { .system(size: size, weight: weight) }
+    static func small(_ size: CGFloat = 12) -> Font { .system(size: size, weight: .semibold) }
 }
 
-/// Small uppercase label: "READY FOR YOU", "UP NEXT · 3:21".
+/// A poster headline: Anton, capitals, set tight.
+struct Poster: View {
+    let text: String
+    var size: CGFloat = 40
+    var color: Color = Theme.ink
+    var lines: Int = 3
+    var body: some View {
+        Text(text.uppercased())
+            .font(.poster(size))
+            .tracking(size * 0.01)
+            .lineSpacing(-size * 0.08)
+            .foregroundStyle(color)
+            .lineLimit(lines)
+            .minimumScaleFactor(0.6)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// A quiet label above or beside content.
 struct Kicker: View {
     let text: String
     var color: Color = Theme.ink2
     var body: some View {
-        Text(text.uppercased())
-            .font(.system(size: 11, weight: .heavy))
-            .tracking(1.4)
-            .foregroundStyle(color)
+        Text(text).font(.system(size: 13, weight: .semibold)).foregroundStyle(color)
     }
 }
 
-/// The big coral pill button.
+/// The main action: a pill in tonight's colour.
 struct PrimaryButton: View {
+    @Environment(AppState.self) private var app
     let title: String
     var icon: String? = "play.fill"
     var wide = false
+    var onColor = false          // sitting on a colour field: go dark instead
     let action: () -> Void
     var body: some View {
-        Button(action: action) {
+        Button {
+            Haptics.thud()
+            action()
+        } label: {
             HStack(spacing: 10) {
                 if let icon { Image(systemName: icon).font(.system(size: 15, weight: .heavy)) }
                 Text(title)
             }
-            .font(.system(size: 16, weight: .heavy))
-            .foregroundStyle(Theme.accentInk)
+            .font(.system(size: 17, weight: .bold))
+            .foregroundStyle(onColor ? Theme.ink : Theme.onColor)
             .frame(maxWidth: wide ? .infinity : nil)
-            .padding(.horizontal, 22)
-            .frame(height: 54)
-            .background(Theme.accent, in: Capsule())
+            .padding(.horizontal, 24)
+            .frame(height: 56)
+            .background(onColor ? Theme.onColor : app.accent, in: Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
     }
 }
 
-/// Outlined pill button: "Change", "New take".
+/// Buttons sink a little when pressed.
+struct PressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+/// A secondary action.
 struct GhostButton: View {
     let title: String
+    var onColor = false
     let action: () -> Void
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 15, weight: .bold))
-                .foregroundStyle(Theme.ink)
-                .padding(.horizontal, 18)
-                .frame(height: 46)
-                .overlay(Capsule().stroke(Theme.hair2, lineWidth: 1))
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(onColor ? Theme.onColor : Theme.ink)
+                .padding(.horizontal, 20)
+                .frame(height: 56)
+                .background((onColor ? Color.black.opacity(0.14) : Theme.surface3), in: Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
     }
 }
 
 /// A chip: steering requests, phases.
 struct Chip: View {
+    @Environment(AppState.self) private var app
     let label: String
     var icon: String? = nil
     var on = false
     var light = false
     let action: () -> Void
     var body: some View {
-        Button(action: action) {
+        Button {
+            Haptics.tap()
+            action()
+        } label: {
             HStack(spacing: 6) {
                 if let icon { Image(systemName: icon).font(.system(size: 12, weight: .heavy)) }
                 Text(label).lineLimit(1)
             }
-            .font(.system(size: 14, weight: .bold))
-            .foregroundStyle(on ? Theme.accentInk : Theme.ink)
-            .padding(.horizontal, 14)
-            .frame(height: 38)
-            .background(on ? Theme.accent : (light ? Color.white.opacity(0.14) : Theme.surface3), in: Capsule())
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(on ? Theme.onColor : Theme.ink)
+            .padding(.horizontal, 15)
+            .frame(height: 40)
+            .background(on ? app.accent : (light ? Color.white.opacity(0.13) : Theme.surface3), in: Capsule())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
     }
 }
 
@@ -152,9 +202,10 @@ struct IconButton: View {
                 .font(.system(size: size, weight: .bold))
                 .foregroundStyle(Theme.ink)
                 .frame(width: 44, height: 44)
-                .background(filled ? Theme.surface3 : Color.clear, in: Circle())
+                .background(filled ? Color.white.opacity(0.12) : Color.clear, in: Circle())
+                .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle())
     }
 }
 
@@ -172,10 +223,10 @@ struct TopBar<Trailing: View>: View {
 
     var body: some View {
         ZStack {
-            Text(title).font(.system(size: 17, weight: .heavy)).foregroundStyle(Theme.ink).lineLimit(1)
+            Text(title).font(.system(size: 17, weight: .semibold)).foregroundStyle(Theme.ink).lineLimit(1)
             HStack {
                 if let onBack {
-                    IconButton(system: "chevron.left", size: 20, action: onBack)
+                    IconButton(system: "chevron.left", size: 19, action: onBack)
                 } else {
                     Color.clear.frame(width: 44, height: 44)
                 }
@@ -227,13 +278,13 @@ struct ToastView: View {
     let text: String
     var body: some View {
         Text(text)
-            .font(.system(size: 14, weight: .bold))
-            .foregroundStyle(Theme.ink)
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(Theme.onColor)
             .multilineTextAlignment(.center)
             .padding(.horizontal, 18)
-            .padding(.vertical, 12)
-            .background(Theme.surface3, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .shadow(color: .black.opacity(0.4), radius: 16, y: 6)
-            .padding(.horizontal, 32)
+            .padding(.vertical, 13)
+            .background(Theme.ink, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .shadow(color: .black.opacity(0.45), radius: 18, y: 8)
+            .padding(.horizontal, 28)
     }
 }

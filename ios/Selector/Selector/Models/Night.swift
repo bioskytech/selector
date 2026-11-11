@@ -60,6 +60,12 @@ struct SteerUndo {
     let energyOff: ((Double) -> Double)?
     let fam: Double
     let durS: Double
+    let weights: [String: Int]
+    let favor: [Int: Double]
+    let banned: Set<Int>
+    let pv: [Int]
+    let pool: [Int]
+    let at: Int                 // position that was playing when the request was made
 }
 
 /// The current plan and its playback state.
@@ -91,6 +97,7 @@ final class Night {
     var inFlight: Set<Int> = []
     var resolveAgain = false
     var priority = 0
+    var firstPlay: Date?
     var skips: [Int] = []              // catalog track ids skipped early
 
     func track(at k: Int) -> Track? { k >= 0 && k < am.count ? am[k].track : nil }

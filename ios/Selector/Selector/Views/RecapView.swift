@@ -1,51 +1,36 @@
 import SwiftUI
 
-/// The morning after: what the night was, shareable.
+/// The morning after: the night as a poster, ready to share.
 struct RecapView: View {
     @Environment(AppState.self) private var app
 
     var body: some View {
         VStack(spacing: 0) {
-            TopBar("Last night", onBack: { app.home() })
+            TopBar("", onBack: { app.home() })
             if let r = app.recap {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 20) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(r.title).font(.display(30)).foregroundStyle(Theme.ink)
-                            Text("\(r.date) · \(Fmt.length(r.seconds)) · \(r.songs) songs\(r.requests == 0 ? " · no requests needed" : "")")
-                                .font(.text(14)).foregroundStyle(Theme.ink2)
-                        }
-                        card(r)
+                    VStack(alignment: .leading, spacing: 18) {
+                        poster(r)
                         HStack(spacing: 10) {
                             ShareLink(item: app.shareText(r)) {
                                 HStack(spacing: 10) {
-                                    Image(systemName: "square.and.arrow.up").font(.system(size: 16, weight: .heavy))
+                                    Image(systemName: "square.and.arrow.up").font(.system(size: 16, weight: .bold))
                                     Text("Share the night")
                                 }
-                                .font(.system(size: 16, weight: .heavy))
-                                .foregroundStyle(Theme.accentInk)
+                                .font(.system(size: 17, weight: .bold))
+                                .foregroundStyle(Theme.onColor)
                                 .frame(maxWidth: .infinity)
-                                .frame(height: 54)
-                                .background(Theme.accent, in: Capsule())
+                                .frame(height: 56)
+                                .background(color(r), in: Capsule())
                             }
-                            .buttonStyle(.plain)
-                            Button { app.playAgain(r) } label: {
-                                Image(systemName: "play.fill")
-                                    .font(.system(size: 18, weight: .heavy))
-                                    .foregroundStyle(Theme.ink)
-                                    .frame(width: 54, height: 54)
-                                    .overlay(Circle().stroke(Theme.hair2, lineWidth: 1))
-                            }
-                            .buttonStyle(.plain)
+                            .buttonStyle(PressStyle())
+                            GhostButton(title: "Play it again") { app.playAgain(r) }
                         }
                         if r.saved {
-                            HStack(spacing: 12) {
-                                Image(systemName: "checkmark.circle").font(.system(size: 20, weight: .bold)).foregroundStyle(Theme.good)
-                                Text("Saved to Apple Music as a playlist").font(.text(14, .bold)).foregroundStyle(Theme.ink)
-                                Spacer()
+                            HStack(spacing: 10) {
+                                Image(systemName: "checkmark.circle.fill").font(.system(size: 18)).foregroundStyle(Theme.good)
+                                Text("Saved to Apple Music as a playlist").font(.text(15, .medium)).foregroundStyle(Theme.ink2)
                             }
-                            .padding(14)
-                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                         }
                     }
                     .padding(.horizontal, 20)
@@ -59,68 +44,64 @@ struct RecapView: View {
         .toolbar(.hidden, for: .navigationBar)
     }
 
-    private func card(_ r: Recap) -> some View {
-        let keys = r.weights.filter { $0.value > 0 }.keys.sorted()
-        let cols = [GridItem(.flexible(), spacing: 3), GridItem(.flexible(), spacing: 3), GridItem(.flexible(), spacing: 3), GridItem(.flexible(), spacing: 3), GridItem(.flexible(), spacing: 3)]
-        return ZStack(alignment: .bottom) {
-            VStack {
-                LazyVGrid(columns: cols, spacing: 3) {
-                    ForEach(0..<15, id: \.self) { i in
-                        let key = keys.isEmpty ? "pop" : keys[i % keys.count]
-                        let url = i < r.arts.count ? r.arts[i].flatMap { URL(string: $0) } : nil
-                        Cover(url: url, color: Color.shade(Vibes.hex(key), Double((i % 3) * 9 - 9)), radius: 0)
-                            .aspectRatio(1, contentMode: .fit)
-                    }
-                }
-                .rotationEffect(.degrees(-8))
-                .scaleEffect(1.25)
-                .offset(x: -20, y: -30)
-                Spacer(minLength: 0)
-            }
-            VStack(alignment: .leading, spacing: 14) {
-                Kicker(text: "The floor peaked at \(r.peakAt)")
-                HStack(spacing: 14) {
-                    Cover(url: r.peakArt.flatMap { URL(string: $0) }, color: peakColor(r), radius: 12)
-                        .frame(width: 72, height: 72)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(r.peakJ < (app.planner?.cat.count ?? 0) ? Catalog.shortTitle(app.trackName(r.peakJ)) : "")
-                            .font(.display(24)).foregroundStyle(Theme.ink).lineLimit(2)
-                        Text(r.peakJ < (app.planner?.cat.count ?? 0) ? app.trackArtists(r.peakJ) : "")
-                            .font(.text(15)).foregroundStyle(Theme.ink2).lineLimit(1)
-                    }
-                }
-                HStack(spacing: 24) {
-                    stat("\(r.songs)", "songs")
-                    stat("\(r.loved)", "you loved")
-                    stat("\(r.requests)", r.requests == 1 ? "request" : "requests")
-                }
-                HStack(spacing: 8) {
-                    Circle().fill(Theme.accent).frame(width: 14, height: 14)
-                    Text("SELECTOR").font(.system(size: 12, weight: .heavy)).tracking(0.6).foregroundStyle(Theme.ink2)
-                }
-            }
-            .padding(22)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                LinearGradient(colors: [Theme.surface.opacity(0), Theme.surface, Theme.surface], startPoint: .top, endPoint: .bottom)
-                    .padding(.top, -60)
-            )
-        }
-        .frame(height: 400)
-        .background(Theme.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(Theme.hair, lineWidth: 1))
+    private func keys(_ r: Recap) -> [String] {
+        r.weights.filter { $0.value > 0 }.sorted { $0.value > $1.value || ($0.value == $1.value && $0.key < $1.key) }.map { $0.key }
     }
+    private func color(_ r: Recap) -> Color { Color(hex: Vibes.hex(keys(r).first ?? "punjabi")) }
 
-    private func peakColor(_ r: Recap) -> Color {
-        let keys = r.weights.filter { $0.value > 0 }.keys.sorted()
-        return Color(hex: Vibes.hex(keys.first ?? "punjabi"))
+    private func poster(_ r: Recap) -> some View {
+        let ks = keys(r)
+        let a = color(r)
+        let b = ks.count > 1 ? Color(hex: Vibes.hex(ks[1])) : Color.shade(Vibes.hex(ks.first ?? "punjabi"), -22)
+        let known = r.peakJ < (app.planner?.cat.count ?? 0)
+        return VStack(alignment: .leading, spacing: 0) {
+            Text("\(r.date) night").font(.text(15, .bold)).foregroundStyle(Theme.onColor.opacity(0.7))
+            Poster(text: r.title, size: 62, color: Theme.onColor, lines: 3)
+                .padding(.top, 8)
+
+            HStack(spacing: -16) {
+                ForEach(0..<5, id: \.self) { i in
+                    let key = ks.isEmpty ? "pop" : ks[i % ks.count]
+                    let url = i < r.arts.count ? r.arts[i].flatMap { URL(string: $0) } : nil
+                    Cover(url: url, color: Color.shade(Vibes.hex(key), Double(-12 * (i % 3)) - 18), radius: 8)
+                        .frame(width: 76, height: 76)
+                        .shadow(color: .black.opacity(0.35), radius: 8, x: -3, y: 4)
+                        .rotationEffect(.degrees(Double(i - 2) * 4))
+                        .zIndex(Double(i))
+                }
+            }
+            .padding(.top, 22)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("The floor peaked at \(r.peakAt) with").font(.text(15, .semibold)).foregroundStyle(Theme.onColor.opacity(0.7))
+                Text(known ? Catalog.shortTitle(app.trackName(r.peakJ)) : "")
+                    .font(.system(size: 26, weight: .bold)).foregroundStyle(Theme.onColor).lineLimit(2)
+                Text(known ? app.trackArtists(r.peakJ) : "")
+                    .font(.text(16, .medium)).foregroundStyle(Theme.onColor.opacity(0.78)).lineLimit(1)
+            }
+            .padding(.top, 26)
+
+            HStack(alignment: .top, spacing: 28) {
+                stat("\(r.songs)", "songs")
+                stat(Fmt.length(r.seconds), "of music")
+                if r.loved > 0 { stat("\(r.loved)", "loved") }
+                if r.requests > 0 { stat("\(r.requests)", r.requests == 1 ? "request" : "requests") }
+            }
+            .padding(.top, 26)
+
+            Text("Planned by Selector").font(.text(13, .bold)).foregroundStyle(Theme.onColor.opacity(0.55))
+                .padding(.top, 22)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(LinearGradient(colors: [a, b], startPoint: .topLeading, endPoint: .bottomTrailing))
+        .clipShape(RoundedRectangle(cornerRadius: 32, style: .continuous))
     }
 
     private func stat(_ value: String, _ label: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(value).font(.display(20)).foregroundStyle(Theme.ink)
-            Text(label).font(.text(12, .bold)).foregroundStyle(Theme.ink2)
+        VStack(alignment: .leading, spacing: 0) {
+            Text(value.uppercased()).font(.poster(30)).foregroundStyle(Theme.onColor)
+            Text(label).font(.text(13, .semibold)).foregroundStyle(Theme.onColor.opacity(0.7))
         }
     }
 }

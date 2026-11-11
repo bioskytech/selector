@@ -4,12 +4,14 @@ import SwiftUI
 struct SelectorApp: App {
     @State private var app = AppState()
 
+    init() { Theme.registerFonts() }
+
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(app)
                 .preferredColorScheme(.dark)
-                .tint(Theme.accent)
+                .tint(Theme.ink)
         }
     }
 }

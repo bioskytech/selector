@@ -8,23 +8,24 @@ struct BriefView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TopBar("Tonight", onBack: { app.back() }) {
+            TopBar("", onBack: { app.back() }) {
                 Button("Reset") { app.applyOccasion("sangeet") }
-                    .font(.text(15, .bold)).foregroundStyle(Theme.ink2)
-                    .frame(height: 44).padding(.trailing, 8)
+                    .font(.text(16, .semibold)).foregroundStyle(Theme.ink2)
+                    .frame(height: 44).padding(.trailing, 10)
             }
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Poster(text: "What's the night?", size: 40).padding(.bottom, 6)
                     rowCard(label: "Occasion", value: Occasion.named(app.settings.occasion)?.label ?? "Custom", detail: nil) { app.sheet = .occasion }
-                    rowCard(label: "Length", value: Fmt.lengthWords(minutes: app.settings.minutes), detail: "· ends \(app.endsAt(minutes: app.settings.minutes))") { app.sheet = .length }
-                    rowCard(label: "Crowd", value: app.settings.clean ? "Family-friendly" : "Anything goes", detail: app.settings.fam >= 0.65 ? "· songs we know" : "· surprise us") { app.sheet = .crowd }
+                    rowCard(label: "Length", value: Fmt.lengthWords(minutes: app.settings.minutes), detail: "ends \(app.endsAt(minutes: app.settings.minutes))") { app.sheet = .length }
+                    rowCard(label: "Crowd", value: app.settings.clean ? "Family-friendly" : "Anything goes", detail: app.settings.fam >= 0.65 ? "songs we know" : "surprise us") { app.sheet = .crowd }
 
-                    HStack(alignment: .firstTextBaseline) {
-                        Text("Sounds").font(.display(20)).foregroundStyle(Theme.ink)
+                    HStack(alignment: .lastTextBaseline) {
+                        Poster(text: "Sounds", size: 28)
                         Spacer()
-                        Text("Star a headliner").font(.text(12, .bold)).foregroundStyle(Theme.ink3)
+                        Text("Star up to two headliners").font(.text(13, .regular)).foregroundStyle(Theme.ink3)
                     }
-                    .padding(.top, 10)
+                    .padding(.top, 16)
 
                     LazyVGrid(columns: columns, spacing: 10) {
                         ForEach(Vibes.order, id: \.self) { key in
@@ -56,10 +57,10 @@ struct BriefView: View {
         Button(action: action) {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(label.uppercased()).font(.system(size: 11, weight: .heavy)).tracking(1.2).foregroundStyle(Theme.ink3)
+                    Text(label).font(.text(13, .semibold)).foregroundStyle(Theme.ink3)
                     HStack(spacing: 6) {
-                        Text(value).font(.text(17, .bold)).foregroundStyle(Theme.ink)
-                        if let detail { Text(detail).font(.text(15)).foregroundStyle(Theme.ink2) }
+                        Text(value).font(.text(18, .semibold)).foregroundStyle(Theme.ink)
+                        if let detail { Text(detail).font(.text(15, .regular)).foregroundStyle(Theme.ink2) }
                     }
                     .lineLimit(1)
                 }
@@ -75,7 +76,7 @@ struct BriefView: View {
 
     private var tasteCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Your taste").font(.display(18)).foregroundStyle(Theme.ink)
+            Poster(text: "Your taste", size: 24)
             Text(app.taste.map { t in
                 var s = "\(t.source). Your DJ knows \(t.matched.count) of your artists"
                 if !t.matched.isEmpty { s += ": " + t.matched.prefix(5).joined(separator: ", ") }
@@ -105,16 +106,16 @@ struct VibeTile: View {
         let w = app.settings.weights[key] ?? 0
         let on = w > 0, head = w >= 3
         let fill = Color(hex: style.hex)
-        let textColor: Color = on ? (style.dark ? Theme.accentInk : Theme.ink) : Theme.ink
+        let textColor: Color = on ? Theme.onColor : Theme.ink
         ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(on ? fill : Theme.surface)
-            Button { app.toggleVibe(key) } label: {
+            Button { Haptics.tap(); app.toggleVibe(key) } label: {
                 VStack(alignment: .leading, spacing: 3) {
                     Spacer(minLength: 0)
-                    Text(style.label).font(.system(size: 15, weight: .heavy)).foregroundStyle(textColor).lineLimit(2)
+                    Text(style.label).font(.system(size: 17, weight: .bold)).foregroundStyle(textColor).lineLimit(2)
                     Text(key == "mideast" ? "mostly Turkish for now" : "\((app.planner?.vibe(key)?.n ?? 0).formatted()) songs")
-                        .font(.text(11)).foregroundStyle(textColor.opacity(on ? 0.75 : 0.5))
+                        .font(.text(12, .regular)).foregroundStyle(textColor.opacity(on ? 0.7 : 0.5))
                 }
                 .padding(.horizontal, 14)
                 .padding(.bottom, 12)
@@ -127,15 +128,15 @@ struct VibeTile: View {
                 Circle().fill(fill).frame(width: 10, height: 10).opacity(on ? 0 : 1)
                 Spacer()
                 if on {
-                    Button { app.starVibe(key) } label: {
+                    Button { Haptics.tap(); app.starVibe(key) } label: {
                         HStack(spacing: 4) {
                             Image(systemName: head ? "star.fill" : "star").font(.system(size: 11, weight: .heavy))
                             if head { Text("Headliner").font(.system(size: 11, weight: .heavy)) }
                         }
-                        .foregroundStyle(head ? Theme.accentInk : textColor)
+                        .foregroundStyle(head ? Theme.ink : textColor)
                         .padding(.horizontal, 9)
                         .frame(height: 26)
-                        .background(head ? Theme.accent : Color.black.opacity(0.22), in: Capsule())
+                        .background(head ? Theme.onColor : Color.black.opacity(0.16), in: Capsule())
                     }
                     .buttonStyle(.plain)
                 }
