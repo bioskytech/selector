@@ -4,6 +4,8 @@ on:
     branches: [main]
     paths: ["docs/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
+  schedule:
+    - cron: "17 9 1 * *"   # monthly, so the token never expires
 permissions:
   contents: read
   pages: write
@@ -19,6 +21,20 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      # Optional: with three repository secrets set, the site plays full songs for Apple Music subscribers.
+      - name: Apple Music token (if the key is configured)
+        env:
+          P8: ${{ secrets.APPLE_MUSIC_P8 }}
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          KEY: ${{ secrets.APPLE_KEY_ID }}
+        run: |
+          if [ -n "$P8" ] && [ -n "$TEAM" ] && [ -n "$KEY" ]; then
+            printf '%s\n' "$P8" > /tmp/key.p8
+            cd docs && node make-token.mjs --team "$TEAM" --key "$KEY" --p8 /tmp/key.p8 --origin "https://${{ github.repository_owner }}.github.io" --days 150
+            rm -f /tmp/key.p8
+          else
+            echo "No Apple Music key configured: the site plays 30-second previews."
+          fi
       - uses: actions/configure-pages@v5
         with:
           enablement: true

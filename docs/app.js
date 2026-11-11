@@ -368,6 +368,67 @@ async function findOnApple(j, clean) {
   if (hit) META.set(hit.id, hit);
   return hit;
 }
+/* ---- no key, no sign-in: Apple's public lookup gives artwork and a 30-second preview ---- */
+const LOOKUP_CACHE = lsGet('selector.lookup.v1', {});
+let lookupLast = 0, lookupGap = 1300, lookupSeq = 0;
+function jsonp(url) {
+  return new Promise((resolve, reject) => {
+    const cb = '__selcb' + (++lookupSeq), s = document.createElement('script');
+    const done = (fn, v) => { clearTimeout(timer); delete window[cb]; s.remove(); fn(v); };
+    const timer = setTimeout(() => done(reject, new Error('timeout')), 12000);
+    window[cb] = data => done(resolve, data);
+    s.onerror = () => done(reject, new Error('blocked'));
+    s.src = url + '&callback=' + cb; document.head.appendChild(s);
+  });
+}
+async function findOnLookup(j, clean) {
+  const key = (clean ? 'c:' : '') + T.id[j];
+  if (key in LOOKUP_CACHE) return LOOKUP_CACHE[key];
+  const want = normT(T.n[j]), arts = T.ar[j].split(', ').map(normA).filter(Boolean);
+  const term = `${searchTitle(T.n[j])} ${T.ar[j].split(', ')[0]}`;
+  const wait = lookupLast + lookupGap - Date.now(); lookupLast = Math.max(Date.now(), lookupLast + lookupGap);
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  let data;
+  try { data = await jsonp(`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&entity=song&limit=8`); }
+  catch (e) { lookupGap = Math.min(lookupGap + 1000, 4000); return undefined; }
+  let best = null, bs = 0;
+  for (const s of (data && data.results) || []) {
+    if (!s.previewUrl || !s.trackName) continue; if (clean && s.trackExplicitness === 'explicit') continue;
+    const tt = normT(s.trackName); const ts = tt === want ? 1 : ((tt.includes(want) || want.includes(tt)) && Math.min(tt.length, want.length) >= 4 ? 0.8 : 0);
+    const an = normA(s.artistName || ''); const as = arts.some(x => an.includes(x) || x.includes(an)) ? 1 : 0;
+    const dd = Math.abs((s.trackTimeMillis || 0) / 1000 - T.dur[j]); const ds = dd <= 4 ? 1 : dd <= 15 ? 0.6 : dd <= 40 ? 0.2 : 0;
+    const sc = ts * 0.55 + as * 0.35 + ds * 0.10; if (sc > bs) { bs = sc; best = s; }
+  }
+  const hit = best && bs >= 0.72 ? { id: 'l' + best.trackId, url: best.trackViewUrl || '', art: (best.artworkUrl100 || '').replace('100x100', '600x600'), bg: '', text: '', preview: best.previewUrl, dur: (best.trackTimeMillis || 0) / 1000, explicit: best.trackExplicitness === 'explicit', name: best.trackName, artist: best.artistName, lookup: true } : null;
+  LOOKUP_CACHE[key] = hit; lsSet('selector.lookup.v1', LOOKUP_CACHE);
+  return hit;
+}
+/* fills the night in the background, what plays soonest first; positions never shift */
+async function resolveNightLookup(night) {
+  if (night.resolving) return;
+  night.resolving = true; night.resolveNote = '';
+  const plan = night.plan; let fails = 0;
+  const next = () => { const n = plan.seq.length, start = Math.max(0, Player.mode !== 'none' ? Player.idx : (night.priority || 0)); for (let o = 0; o < n; o++) { const k = (start + o) % n; if (night.am[k] === undefined) return k; } return -1; };
+  while (NIGHT === night && fails < 3) {
+    const k = next(); if (k < 0) break;
+    const j = plan.seq[k]; let hit = await findOnLookup(j, plan.clean);
+    if (NIGHT !== night || plan.seq[k] !== j) continue;
+    if (hit === undefined) { fails++; continue; }
+    fails = 0;
+    if (!hit) { const alt = alternative(plan, k, new Set(plan.seq)); if (alt >= 0) { const h2 = await findOnLookup(alt, plan.clean); if (NIGHT !== night || plan.seq[k] !== j) continue; if (h2) { plan.seq[k] = alt; night.replaced.add(k); hit = h2; } } }
+    night.am[k] = hit || null;
+    const found = night.am.filter(m => m !== undefined).length;
+    if (current === 'plan') renderPlanStatus(found < plan.seq.length ? `Finding your songs… ${found} of ${plan.seq.length}` : `All ${plan.seq.length} songs ready.`);
+    if (found % 4 === 0 || found === plan.seq.length || k === (night.priority || 0)) renderCurrentScreen();
+  }
+  night.resolving = false;
+  if (NIGHT !== night) return;
+  night.lookupFailed = fails >= 3;
+  night.resolved = !night.lookupFailed && night.am.every(m => m !== undefined);
+  night.resolveNote = night.lookupFailed ? "Can't reach the song lookup right now. Check your connection." : '';
+  renderCurrentScreen();
+}
+
 /* match every track of the night; swap in close fits when Apple Music lacks one */
 async function resolveNight(night) {
   if (!hasApple() || !AM.ready || night.resolving) return;
@@ -418,6 +479,11 @@ const Player = {
       this.ensureAudio(); this.playPreview(k);
     } else { this.dur = T.dur[NIGHT.plan.seq[k]]; this.elapsed = 0; this.playing = true; this.startDemoClock(); }
     this.onTrack(k);
+  },
+  unlock() {
+    this.ensureAudio();
+    const silent = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
+    for (const el of [this.a, this.b]) { try { el.src = silent; const p = el.play(); if (p && p.then) p.then(() => el.pause()).catch(() => {}); } catch (e) {} }
   },
   ensureAudio() {
     if (this.a) return;
@@ -511,7 +577,7 @@ function planNight() {
   if (!plan) { toast('Pick at least one sound'); return false; }
   NIGHT = makeNight(plan);
   Player.stop();
-  if (hasApple() && AM.ready) resolveNight(NIGHT);
+  if (hasApple() && AM.ready) resolveNight(NIGHT); else if (!hasApple() && !DEMO_ONLY) resolveNightLookup(NIGHT);
   return true;
 }
 function clockAt(k) { const base = NIGHT.startedAt || roundedNow(); return new Date(base + startTimes(NIGHT.plan)[k] * 1000); }
@@ -527,6 +593,7 @@ function swapAt(k) {
   plan.seq[k] = alt; NIGHT.am[k] = undefined; NIGHT.replaced.delete(k);
   renderCurrentScreen();
   if (hasApple() && AM.ready) findOnApple(alt, plan.clean).then(hit => { if (!NIGHT || NIGHT.plan.seq[k] !== alt) return; NIGHT.am[k] = hit || null; if (!hit) toast("That one isn't on Apple Music. Swap again."); renderCurrentScreen(); if (Player.mode !== 'none' && k > Player.idx) Player.requeue(); });
+  if (!hasApple() && !DEMO_ONLY) resolveNightLookup(NIGHT);
   if (Player.mode === 'demo' && k > Player.idx) Player.requeue();
 }
 function removeAt(k) {
@@ -562,7 +629,7 @@ function steer(action, arg) {
   NIGHT.replaced = new Set([...NIGHT.replaced].filter(k => k < keep));
   NIGHT.requests.push({ action, arg, at: Date.now() });
   if (action === 'up' && r.seq.length) { let hot = -1, he = -1; for (let i = 0; i < Math.min(4, r.seq.length); i++) if (T.e[r.seq[i]] > he) { he = T.e[r.seq[i]]; hot = i; } if (hot >= 0) reply = `Got it. I'll lift the energy over the next two songs and bring ${T.n[r.seq[hot]].replace(/\s*[\(\[].*$/, '')} forward to ${fmtClock(clockAt(keep + hot))}.`; }
-  if (hasApple() && AM.ready) resolveNight(NIGHT).then(() => Player.requeue()); else Player.requeue();
+  if (hasApple() && AM.ready) resolveNight(NIGHT).then(() => Player.requeue()); else { if (!hasApple() && !DEMO_ONLY) resolveNightLookup(NIGHT); Player.requeue(); }
   renderCurrentScreen();
   return reply;
 }
@@ -689,7 +756,7 @@ function renderPlan() {
   $('#btn-start span').textContent = Player.mode !== 'none' ? 'Back to the night' : 'Start the night';
   $('#btn-save').classList.toggle('filled', NIGHT.saved);
   $('#btn-save').innerHTML = NIGHT.saved ? '<svg viewBox="0 0 24 24"><path d="M5 12l5 5 9-10" fill="none" stroke="#fff" stroke-width="2.4"/></svg>' : '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>';
-  renderPlanStatus(NIGHT.resolving ? 'Finding your songs on Apple Music…' : (NIGHT.resolveNote || (NIGHT.resolved ? `All ${n} songs found on Apple Music.` : (hasApple() ? '' : (DEMO_ONLY ? 'Demo: the plan is real, playback needs the full app.' : 'Add your Apple Music key to hear it.')))));
+  renderPlanStatus(NIGHT.resolving ? 'Finding your songs on Apple Music…' : (NIGHT.resolveNote || (NIGHT.resolved ? `All ${n} songs found on Apple Music.` : (hasApple() ? '' : (DEMO_ONLY ? 'Demo: the plan is real, playback needs the full app.' : '')))));
   renderJourney();
   $('#link-all').textContent = `All ${n} songs`;
   $('#plan-first').innerHTML = [0, 1].filter(k => k < n).map(k => songRow(k, { time: fmtClock(clockAt(k)) })).join('');
@@ -753,7 +820,7 @@ function renderNowPlaying() {
   const heads = Object.entries(NIGHT.plan.weights).filter(([, w]) => w >= 3).map(([k2]) => k2);
   const chips = [['up', 'More energy', 'M12 19V5M6 11l6-6 6 6'], ['down', 'Bring it down', 'M12 5v14M6 13l6 6 6-6'], ['familiar', 'Something we know'], ...heads.slice(0, 1).map(h => ['more', `More ${vname(h)}`, '', h]), ['skip', 'Skip this vibe'], ['wrap', 'Wrap up in 20 min', '', 20]];
   $('#steer-row').innerHTML = chips.map(c => `<button class="chip light" type="button" data-steer="${c[0]}" data-arg="${c[3] ?? ''}">${c[2] ? `<svg viewBox="0 0 24 24"><path d="${c[2]}"/></svg>` : ''}${esc(c[1])}</button>`).join('');
-  $('#np-mode').textContent = Player.mode === 'full' ? (isIOS ? 'Full songs from your Apple Music. Keep Selector open to hear the whole night.' : 'Full songs from your Apple Music.') : Player.mode === 'preview' ? `Preview mode: 30 seconds of each song${Player.xf ? ', blended' : ''}. Connect Apple Music for full songs.` : 'Demo: the clock runs six times faster than the music would. Playback needs the full app.';
+  $('#np-mode').textContent = Player.mode === 'full' ? (isIOS ? 'Full songs from your Apple Music. Keep Selector open to hear the whole night.' : 'Full songs from your Apple Music.') : Player.mode === 'preview' ? `Previews: 30 seconds of each song${Player.xf ? ', blended' : ''}.${hasApple() ? ' Connect Apple Music for full songs.' : ''}` : 'Demo: the clock runs six times faster than the music would. Playback needs the full app.';
   renderTransport(); renderProgress(); renderMini();
 }
 function mixDark(hex) { try { const n = parseInt(hex.slice(1), 16); const r = n >> 16, g = n >> 8 & 255, b = n & 255; const f = 0.28; return `rgb(${Math.round(r * f + 10)},${Math.round(g * f + 10)},${Math.round(b * f + 13)})`; } catch (e) { return '#1A0F12'; } }
@@ -808,7 +875,21 @@ function closeSheets() { $('#backdrop').hidden = true; $$('.sheet').forEach(s =>
 async function startNight(fromK = 0) {
   if (!NIGHT) { if (!planNight()) return; }
   if (Player.mode !== 'none') { go('playing'); return; }
-  if (!hasApple()) { await Player.start(fromK, 'demo'); go('playing'); return; }
+  if (!hasApple()) {
+    if (DEMO_ONLY) { await Player.start(fromK, 'demo'); go('playing'); return; }
+    if (startNight.busy) return; startNight.busy = true;
+    Player.unlock();                                   // inside the tap, so the browser lets sound start later
+    const night = NIGHT; night.priority = fromK;
+    renderPlanStatus('Cueing up the first song…');
+    resolveNightLookup(night);
+    const t0 = Date.now();
+    while (NIGHT === night && night.am[fromK] === undefined && !night.lookupFailed && Date.now() - t0 < 15000) await new Promise(r => setTimeout(r, 120));
+    startNight.busy = false;
+    if (NIGHT !== night) return;
+    let first = -1; for (let k = fromK; k < night.am.length; k++) if (night.am[k] && night.am[k].preview) { first = k; break; }
+    if (first < 0) { toast("Couldn't reach the song lookup, so this is a silent run-through."); await Player.start(fromK, 'demo'); go('playing'); return; }
+    await Player.start(first, 'preview'); go('playing'); return;
+  }
   if (!AM.ready) { toast(AM.failed ? 'Apple Music failed to start: ' + AM.failed : 'Apple Music is still loading, one moment'); return; }
   if (NIGHT.resolving) { toast('Still finding your songs. One moment.'); return; }
   if (!NIGHT.resolved) { await resolveNight(NIGHT); }
