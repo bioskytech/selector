@@ -16,7 +16,6 @@ jobs:
           xcodebuild -version
       - name: Build for the Simulator (no signing)
         run: |
-          set -o pipefail
           cd ios/Selector
           xcodebuild -project Selector.xcodeproj -target Selector -sdk iphonesimulator -configuration Debug \
             CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" ONLY_ACTIVE_ARCH=YES ARCHS=arm64 \
@@ -25,7 +24,7 @@ jobs:
             grep -E "\.swift:[0-9]+:[0-9]+: warning" build.log | sed 's/.*Selector\/Selector\///' | sort -u | head -40
             echo "BUILD SUCCEEDED"; exit 0
           fi
-          echo "---- errors ----"; grep -E "error:" build.log | sed 's/.*Selector\/Selector\///' | sort -u | head -80; exit 1
+          echo "---- errors ----"; (grep -E "error" build.log | sed 's/.*Selector\/Selector\///' | sort -u | head -80) || true; echo "---- tail ----"; tail -25 build.log; exit 1
       - name: Screenshots
         if: success()
         run: |
