@@ -18,7 +18,7 @@ for s in ["more energy", "less energy", "slow it down after this", "more hip-hop
           "more punjabi and wrap up in 15 minutes", "the aunties want to dance", "everyone's sitting down",
           "too loud, people are eating", "some AP Dhillon then bring it down", "last song", "30 minutes left",
           "throw in some reggaeton", "enough of this", "skip this vibe", "surprise us", "drum and bass please",
-          "play something by Bad Bunny", "can we hear Tum Hi Ho", "more r&b", "asdf qwerty"] {
+          "play something by Bad Bunny", "no more punjabi, more Arijit", "can we hear Tum Hi Ho", "more r&b", "asdf qwerty"] {
     print("  \(s)  ->  \(parser.parse(s).map(show).joined(separator: ", "))")
 }
 print("== briefs")

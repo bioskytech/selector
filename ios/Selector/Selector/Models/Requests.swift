@@ -183,9 +183,12 @@ final class RequestParser {
         func add(_ i: DJIntent) { if !out.contains(i) { out.append(i) } }
 
         // Split "more punjabi and wrap up in 20" into clauses, but keep "drum and bass" together.
-        let protected = text.replacingOccurrences(of: "drum and bass", with: "dnb").replacingOccurrences(of: "sing along", with: "singalong")
-        let clauses = protected.components(separatedBy: " and ").flatMap { $0.components(separatedBy: " then ") }
-            .flatMap { $0.components(separatedBy: " but ") }.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        // "no more punjabi, more Arijit": each comma or "and" starts a new request. Keep "drum and bass" together.
+        let parts = raw.components(separatedBy: CharacterSet(charactersIn: ",;"))
+        let clauses = parts.flatMap { part -> [String] in
+            let w = RequestParser.words(part).replacingOccurrences(of: "drum and bass", with: "dnb").replacingOccurrences(of: "sing along", with: "singalong")
+            return w.components(separatedBy: " and ").flatMap { $0.components(separatedBy: " then ") }.flatMap { $0.components(separatedBy: " but ") }
+        }.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
 
         for c in clauses {
             let negative = has(c, "no more|no|less|fewer|enough|skip|stop|without|not so much|tired of|sick of|done with|drop the|lose the|cut the")
