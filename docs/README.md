@@ -4,6 +4,22 @@ Tell the DJ what tonight is. Selector plans the whole night, explains it in a se
 
 It runs in Safari or Chrome and installs to the iPhone home screen like an app.
 
+## It plays without any setup
+
+Open the site and press Start: it finds each song through Apple's public lookup and plays 30-second previews, blended on desktop and Android. No key, no sign-in.
+
+## Full songs: add your Apple Music key
+
+Easiest, no terminal: in this repository go to **Settings → Secrets and variables → Actions → New repository secret** and add three secrets:
+
+- `APPLE_MUSIC_P8`: the whole contents of your `AuthKey_XXXXXXXX.p8` file (open it in a text editor and paste everything)
+- `APPLE_KEY_ID`: the key's 10-character ID
+- `APPLE_TEAM_ID`: your 10-character Team ID
+
+Then run the **Web app to GitHub Pages** workflow (Actions tab → Run workflow). It signs a token that only works on your site, and re-signs it every month.
+
+Or do it by hand:
+
 ## 1. Your Apple Music key (once, 10 minutes)
 
 Selector talks to Apple Music with a developer token. You already have an Apple Developer account.

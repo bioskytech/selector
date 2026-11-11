@@ -21,9 +21,9 @@ struct PlanView: View {
                     VStack(alignment: .leading, spacing: 22) {
                         Fan(tiles: app.nightTiles(), size: 142)
                             .padding(.top, 14)
-                            .padding(.bottom, 6)
+                            .padding(.bottom, 14)
 
-                        VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 12) {
                             Poster(text: plan.title, size: plan.title.count > 16 ? 42 : 56)
                             Text("\(n) songs, \(Fmt.length(tot)). Ends around \(Fmt.clock(app.clock(afterSeconds: tot))).")
                                 .font(.text(16, .regular)).foregroundStyle(Theme.ink2)

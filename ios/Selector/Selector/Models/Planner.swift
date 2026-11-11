@@ -392,6 +392,8 @@ final class SetPlanner {
             if t.vm[j] & foreignMask != 0 && favor[j] == nil { s -= 1.6 }
             if let tw { s += 0.6 * Double(tw[j]) }
             if let f = favor[j] { s += f }
+            // Open and close on songs people know: first and last impressions.
+            if p > 0.93 || cnt == 0 { s += 1.4 * Double(t.p[j]) / 100 }
             s += (fam - 0.5) * 2.2 * (Double(t.p[j]) / 100) + 0.25 * t.d[j]
             return s + rng.unit() * 0.3
         }
