@@ -80,21 +80,58 @@ extension Font {
     static func small(_ size: CGFloat = 12) -> Font { .system(size: size, weight: .semibold) }
 }
 
-/// A poster headline: Anton, capitals, set tight.
+/// A poster headline: Anton, capitals, lines stacked tight the way a gig poster sets them.
 struct Poster: View {
     let text: String
     var size: CGFloat = 40
     var color: Color = Theme.ink
     var lines: Int = 3
     var body: some View {
-        Text(text.uppercased())
-            .font(.poster(size))
-            .tracking(size * 0.01)
-            .lineSpacing(-size * 0.08)
-            .foregroundStyle(color)
-            .lineLimit(lines)
-            .minimumScaleFactor(0.6)
-            .fixedSize(horizontal: false, vertical: true)
+        let words = text.uppercased().split(separator: " ").map(String.init)
+        PosterLines(size: size) {
+            ForEach(Array(words.enumerated()), id: \.offset) { _, w in
+                Text(w).font(.poster(size)).foregroundStyle(color).lineLimit(1).fixedSize()
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(text)
+    }
+}
+
+/// Wraps words into lines with the leading Anton wants: capitals nearly touching.
+/// (Text can't set leading tighter than the font's own, so the words are placed by hand.)
+struct PosterLines: Layout {
+    var size: CGFloat
+    private var leading: CGFloat { size * 0.99 }
+    private var gap: CGFloat { size * 0.24 }
+    private var capTop: CGFloat { size * 0.30 }      // empty space above the capitals in the font's box
+
+    private func rows(_ subviews: Subviews, width: CGFloat) -> [[(Int, CGFloat)]] {
+        var out: [[(Int, CGFloat)]] = [[]]
+        var x: CGFloat = 0
+        for (i, s) in subviews.enumerated() {
+            let w = s.sizeThatFits(.unspecified).width
+            if x + w > width && x > 0 { out.append([]); x = 0 }
+            out[out.count - 1].append((i, x))
+            x += w + gap
+        }
+        return out
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? 320
+        let r = rows(subviews, width: width)
+        var widest: CGFloat = 0
+        for row in r { if let last = row.last { widest = max(widest, last.1 + subviews[last.0].sizeThatFits(.unspecified).width) } }
+        return CGSize(width: min(width, widest), height: CGFloat(max(r.count, 1) - 1) * leading + size * 0.90)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for (line, row) in rows(subviews, width: bounds.width).enumerated() {
+            for (i, x) in row {
+                subviews[i].place(at: CGPoint(x: bounds.minX + x, y: bounds.minY + CGFloat(line) * leading - capTop), proposal: .unspecified)
+            }
+        }
     }
 }
 

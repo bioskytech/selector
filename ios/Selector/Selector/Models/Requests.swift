@@ -78,7 +78,10 @@ final class RequestParser {
         "before", "night", "hour", "hours", "minutes", "energy", "bring", "something", "anything", "nothing", "again", "there",
         "friends", "people", "girls", "boys", "kids", "little", "mostly", "mainly", "heavy", "clean", "explicit", "wedding",
         "birthday", "sunset", "dinner", "rooftop", "warehouse", "techno", "trance", "reggaeton", "punjabi", "bollywood",
-    ])
+        "three", "seven", "eight", "loving", "lovely", "happy", "crazy", "sweet", "super", "royal", "magic", "golden", "silver",
+        "sound", "sounds", "music", "disco", "funky", "electric", "radio", "summer", "winter", "money", "queen", "prince",
+        "king", "kings", "lady", "mister", "miss", "tonight", "today", "always", "never", "every", "great", "good", "best",
+    ]).union(Set(aliases.flatMap { $0.words.split(separator: " ").map(String.init) }))
 
     init(catalog: Catalog) {
         cat = catalog
@@ -86,11 +89,16 @@ final class RequestParser {
             let w = RequestParser.words(name)
             if w.count >= 4 && !RequestParser.common.contains(w) { artistByWords[w] = name }
         }
-        // First names people actually say: "more Diljit", "some Karan".
+        var trackCount: [String: Int] = [:]
+        for j in 0..<catalog.count {
+            for a in catalog.t.ar[j].components(separatedBy: ", ") { trackCount[Normalizer.artist(a), default: 0] += 1 }
+        }
+        // First names people actually say: "more Diljit", "some Karan". Only for artists with a real presence in the crate.
         var firstNames: [String: [String]] = [:]
         for name in catalog.artists {
             let parts = RequestParser.words(name).split(separator: " ")
-            if parts.count >= 2, let f = parts.first, f.count >= 5, !RequestParser.common.contains(String(f)) { firstNames[String(f), default: []].append(name) }
+            if parts.count >= 2, let f = parts.first, f.count >= 5, !RequestParser.common.contains(String(f)),
+               (trackCount[Normalizer.artist(name)] ?? 0) >= 4 { firstNames[String(f), default: []].append(name) }
         }
         for (f, names) in firstNames where names.count == 1 && artistByWords[f] == nil { artistByWords[f] = names[0] }
 
@@ -197,12 +205,17 @@ final class RequestParser {
             let ent = entities(in: c)
             for v in vs { add(negative ? .less(vibe: v) : .more(vibe: v)) }
             for a in ent.artists { add(negative ? .lessArtist(name: a) : .moreArtist(name: a)) }
+            var askedForSong = false
             if !negative {
-                let playVerb = has(c, "play|put on|queue|drop|spin|next|request|hear|want")
-                for j in ent.songs where playVerb || ent.artists.isEmpty { add(.playSong(track: j)) }
-                if ent.songs.isEmpty, ent.artists.isEmpty, let j = singleWordSong(in: c) { add(.playSong(track: j)) }
+                let playVerb = has(c, "play|put on|queue|drop|spin|request|hear")
+                for j in ent.songs {
+                    // Without "play", a title only counts when it's the whole request ("Brown Munde").
+                    let whole = RequestParser.words(Catalog.shortTitle(cat.t.n[j])) == c
+                    if playVerb || whole { add(.playSong(track: j)); askedForSong = true }
+                }
+                if !askedForSong, ent.artists.isEmpty, let j = singleWordSong(in: c) { add(.playSong(track: j)); askedForSong = true }
             }
-            if !vs.isEmpty || !ent.artists.isEmpty || !ent.songs.isEmpty { continue }
+            if !vs.isEmpty || !ent.artists.isEmpty || askedForSong { continue }
 
             if negative && has(c, "this|this vibe|this stuff|this one|these") { add(.less(vibe: nil)); continue }
 
@@ -210,9 +223,9 @@ final class RequestParser {
             if has(c, "aunties|aunty|uncles|parents|grandparents|elders|family|everyone|everybody|crowd pleaser|crowd pleasers|singalong|wedding classics") {
                 add(.familiar)
             }
-            if has(c, "dead|boring|bored|asleep|sleepy|sitting|nobody|no one|empty|flat|lame|wake") { add(.energy(up: true)); add(.familiar) }
+            if has(c, "dead|boring|bored|asleep|sleepy|sitting|nobody|no one|empty|flat|lame|wake") { add(.energy(up: true)); add(.familiar); continue }
             if has(c, "too loud|too much|too fast|too hard|too intense|headache|breather|break|talk|chat|dinner|eating|romantic|slow dance|couples") {
-                add(.energy(up: false))
+                add(.energy(up: false)); continue
             }
 
             let down = has(c, "slow|slower|chill|chiller|mellow|calm|calmer|softer|quieter|lower|down|easy|ease|relax|cool it|cool down|tone it")

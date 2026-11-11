@@ -19,12 +19,12 @@ struct PlanView: View {
                 let tot = planner.totalSeconds(plan)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 22) {
-                        Fan(tiles: app.nightTiles(), size: 150)
+                        Fan(tiles: app.nightTiles(), size: 142)
                             .padding(.top, 14)
                             .padding(.bottom, 6)
 
                         VStack(alignment: .leading, spacing: 8) {
-                            Poster(text: plan.title, size: 52)
+                            Poster(text: plan.title, size: plan.title.count > 16 ? 42 : 56)
                             Text("\(n) songs, \(Fmt.length(tot)). Ends around \(Fmt.clock(app.clock(afterSeconds: tot))).")
                                 .font(.text(16, .regular)).foregroundStyle(Theme.ink2)
                         }

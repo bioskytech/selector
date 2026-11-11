@@ -101,7 +101,7 @@ struct Fan: View {
                     .frame(width: size, height: size)
                     .shadow(color: .black.opacity(0.45), radius: 12, x: -4, y: 8)
                     .rotationEffect(.degrees(angles[i]))
-                    .offset(x: offsets[i] * size * 0.42, y: abs(offsets[i]) * size * 0.06)
+                    .offset(x: offsets[i] * size * 0.36, y: abs(offsets[i]) * size * 0.06)
             }
         }
         .frame(height: size * 1.22)

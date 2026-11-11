@@ -109,21 +109,19 @@ struct TonightView: View {
         let title = open?.plan.title ?? s.title
         let sounds = open?.plan.soundsByWeight ?? s.sounds
         let length = open.map { _ in "" } ?? Fmt.lengthWords(minutes: s.minutes)
-        return ZStack(alignment: .bottomTrailing) {
-            LinearGradient(colors: [app.accent, app.accent2], startPoint: .topLeading, endPoint: .bottomTrailing)
+        return ZStack(alignment: .topTrailing) {
+            LinearGradient(colors: [Color.shade(app.accentHex, 6), Color.shade(app.accentHex, -20)], startPoint: .topLeading, endPoint: .bottomTrailing)
             Vinyl(label: Theme.ink)
-                .frame(width: 250)
-                .offset(x: 78, y: 70)
+                .frame(width: 240)
+                .offset(x: 84, y: -72)
             VStack(alignment: .leading, spacing: 0) {
                 Text(open != nil ? (app.player.isActive ? "Playing now" : "Pick up where you left off") : "Tonight")
                     .font(.text(15, .bold)).foregroundStyle(Theme.onColor.opacity(0.7))
                 Spacer(minLength: 12)
-                Poster(text: title, size: 64, color: Theme.onColor, lines: 3)
-                    .padding(.trailing, 40)
+                Poster(text: title, size: title.count > 16 ? 48 : 68, color: Theme.onColor)
                 Text(([length] + sounds.prefix(3).map { Vibes.name($0) }).filter { !$0.isEmpty }.joined(separator: ", ") + (sounds.count > 3 ? " and more" : ""))
                     .font(.text(16, .semibold)).foregroundStyle(Theme.onColor.opacity(0.78))
-                    .padding(.top, 10)
-                    .padding(.trailing, 90)
+                    .padding(.top, 12)
                 HStack(spacing: 10) {
                     if open != nil {
                         PrimaryButton(title: app.player.isActive ? "Back to the night" : "Continue", onColor: true) {
@@ -148,8 +146,7 @@ struct TonightView: View {
 
     private func quickPoster(_ o: Occasion) -> some View {
         let sounds = o.weights.sorted { $0.value > $1.value || ($0.value == $1.value && $0.key < $1.key) }.map { $0.key }
-        let a = Color(hex: Vibes.hex(sounds.first ?? "pop"))
-        let b = sounds.count > 1 ? Color(hex: Vibes.hex(sounds[1])) : a
+        let hex = Vibes.hex(sounds.first ?? "pop")
         return Button {
             Haptics.tap()
             app.applyOccasion(o.key)
@@ -162,7 +159,7 @@ struct TonightView: View {
             }
             .padding(14)
             .frame(width: 150, height: 180, alignment: .topLeading)
-            .background(LinearGradient(colors: [a, b], startPoint: .topLeading, endPoint: .bottomTrailing))
+            .background(LinearGradient(colors: [Color.shade(hex, 6), Color.shade(hex, -18)], startPoint: .topLeading, endPoint: .bottomTrailing))
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         }
         .buttonStyle(PressStyle())

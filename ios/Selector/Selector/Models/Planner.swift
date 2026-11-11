@@ -340,6 +340,16 @@ final class SetPlanner {
         }
         for j in cfg.prefix where j >= 0 && j < n && pv[j] < 0 { pv[j] = homeVibe(j, share: share) }
         guard !pool.isEmpty else { return nil }
+        // How much each sound was asked for, 0...1: headliners own the peak, the rest fill the valleys.
+        let maxW = Double(sel.map { $0.w }.max() ?? 1)
+        var want = Array(repeating: 0.0, count: cat.vibes.count)
+        for s in sel { if let v = vibeIndex[s.key] { want[v] = Double(s.w) / maxW } }
+        // A song that also belongs to a regional sound nobody asked for (a Punjabi track tagged hip-hop
+        // in an Afrobeats night) would stick out, so it has to earn its place.
+        var foreignMask = 0
+        for key in ["bollywood", "punjabi", "southindian", "mideast", "reggaeton", "latin", "afro", "kpop"] {
+            if let v = vibeIndex[key], mask & (1 << v) == 0 { foreignMask |= 1 << v }
+        }
         let favor = cfg.favor
         let banned = cfg.banned
 
@@ -376,7 +386,10 @@ final class SetPlanner {
             let cur = cnt > 0 ? b.vibeCount[v] / Double(cnt) : 0
             s += 3.0 * (share[v] - cur) - 10.0 * max(0, cur - share[v] - 0.03)
             if prev >= 0 && pv[prev] == v && b.block < 4 { s += 0.35 }
-            s += 0.4 * sh.value(at: p) * (energyMed(v) - baseE) / 0.15
+            let arcNow = sh.value(at: p)
+            s += 0.15 * arcNow * (energyMed(v) - baseE) / 0.15
+            s += arcNow > 0 ? 1.1 * arcNow * (want[v] - 0.6) : 0.5 * arcNow * (want[v] - 0.6)
+            if t.vm[j] & foreignMask != 0 && favor[j] == nil { s -= 1.6 }
             if let tw { s += 0.6 * Double(tw[j]) }
             if let f = favor[j] { s += f }
             s += (fam - 0.5) * 2.2 * (Double(t.p[j]) / 100) + 0.25 * t.d[j]

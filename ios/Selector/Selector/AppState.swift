@@ -80,7 +80,7 @@ final class AppState {
         settings = Settings()
         guard screen != "tonight", screen != "brief" else { if screen == "brief" { path = [.brief] }; return }
         guard planNight(), let n = night else { return }
-        n.priority = screen == "plan" ? 0 : 6
+        n.priority = (screen == "plan" || screen == "recap") ? 0 : 6
         // Give the lookup a little while to bring in artwork.
         let deadline = Date().addingTimeInterval(22)
         while Date() < deadline, n.pendingCount > n.plan.seq.count - 12 { try? await Task.sleep(nanoseconds: 300_000_000) }

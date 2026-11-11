@@ -52,11 +52,11 @@ struct RecapView: View {
     private func poster(_ r: Recap) -> some View {
         let ks = keys(r)
         let a = color(r)
-        let b = ks.count > 1 ? Color(hex: Vibes.hex(ks[1])) : Color.shade(Vibes.hex(ks.first ?? "punjabi"), -22)
+        let b = Color.shade(Vibes.hex(ks.first ?? "punjabi"), -22)
         let known = r.peakJ < (app.planner?.cat.count ?? 0)
         return VStack(alignment: .leading, spacing: 0) {
             Text("\(r.date) night").font(.text(15, .bold)).foregroundStyle(Theme.onColor.opacity(0.7))
-            Poster(text: r.title, size: 62, color: Theme.onColor, lines: 3)
+            Poster(text: r.title, size: r.title.count > 16 ? 46 : 64, color: Theme.onColor)
                 .padding(.top, 8)
 
             HStack(spacing: -16) {
